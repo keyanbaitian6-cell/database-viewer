@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base href="/database-viewer/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="databaseのバックアップを読み込んで見る、閲覧専用のページ">
+  <!-- 検索に載せない（記録はページに含まれないが、URLを広めないため）。 -->
+  <meta name="robots" content="noindex, nofollow">
+
+  <!-- iOS: ホーム画面に追加するとアプリのように開く -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="database">
+  <meta name="theme-color" content="#f5f5f7">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>database 閲覧</title>
+  <link rel="manifest" href="manifest.json">
+  <style>body { background: #f5f5f7; margin: 0; }</style>
+</head>
+<body>
+  <script>
+  // バックアップ（database-backup 形式のJSON）を、この端末の中だけで読む。
+  // どこにも送らない。1行に1台の形は1行ずつ読み、グラフの画像と曲線は
+  // 読み飛ばす（iPhoneのメモリと保存領域を使いすぎないため）。
+  // 読んだ結果は IndexedDB に覚え、次からは選び直さなくても開ける。
+  window.databaseViewer = (() => {
+    const DB = 'database-viewer';
+    const STORE = 'kv';
+
+    function lighten(record) {
+      const graph = record && record.graph_measurement;
+      if (graph && typeof graph === 'object') {
+        delete graph.preview_image;
+        delete graph.curve;
+        delete graph.preview_stored;
+        delete graph.curve_stored;
+      }
+      return record;
+    }
+
+    async function parse(stream) {
+      const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+      const records = [];
+      const candidates = [];
+      let header = null;
+      let section = 'header';
+      let buffer = '';
+      let whole = null; // 1行に1台の形でないとき、全文をためる
+      const recordsStart = /"records"\s*:\s*\[$/;
+
+      const handle = (raw) => {
+        const text = raw.trim();
+        if (!text) return;
+        if (section === 'header') {
+          const match = recordsStart.exec(text);
+          if (!text.startsWith('{') || !match) {
+            whole = [raw];
+            section = 'whole';
+            return;
+          }
+          let head = text.slice(0, match.index).trimEnd();
+          if (head.endsWith(',')) head = head.slice(0, -1);
+          header = JSON.parse(head + '}');
+          if (!header || header.format !== 'database-backup') {
+            throw new Error('databaseのバックアップファイルではありません。');
+          }
+          section = 'records';
+          return;
+        }
+        if (text.startsWith(']')) {
+          section = section === 'records' && text.includes('"candidate_snapshots"') &&
+              text.endsWith('[') ? 'candidates' : 'done';
+          return;
+        }
+        if (section === 'done') return;
+        const item = JSON.parse(text.endsWith(',') ? text.slice(0, -1) : text);
+        if (section === 'records') records.push(lighten(item));
+        else candidates.push(item);
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (section === 'whole') { whole.push(value); continue; }
+        buffer += value;
+        let index;
+        while (section !== 'whole' && (index = buffer.indexOf('\n')) >= 0) {
+          handle(buffer.slice(0, index));
+          buffer = buffer.slice(index + 1);
+        }
+        if (section === 'whole') { whole.push(buffer); buffer = ''; }
+        // 見出し行が来ないまま長くなったら、1行だけの以前の形とみなす。
+        if (section === 'header' && buffer.length > 1000000) {
+          whole = [buffer]; buffer = ''; section = 'whole';
+        }
+      }
+      if (section === 'whole') {
+        whole.push(buffer);
+        const doc = JSON.parse(whole.join(''));
+        if (!doc || !Array.isArray(doc.records)) {
+          throw new Error('databaseのバックアップファイルではありません。');
+        }
+        return {
+          header: { format: doc.format, exported_at: doc.exported_at, source: doc.source },
+          records: doc.records.map(lighten),
+          candidates: Array.isArray(doc.candidate_snapshots) ? doc.candidate_snapshots : [],
+        };
+      }
+      handle(buffer);
+      return { header, records, candidates };
+    }
+
+    function finish(result, name) {
+      result.file = name;
+      result.loaded_at = new Date().toISOString();
+      return JSON.stringify(result);
+    }
+
+    function open() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore(STORE);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    return {
+      // ファイルを選んで読む。選ばなければ null。
+      pick() {
+        return new Promise((resolve, reject) => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json,application/json';
+          input.onchange = async () => {
+            const file = input.files && input.files[0];
+            if (!file) { resolve(null); return; }
+            try { resolve(finish(await parse(file.stream()), file.name)); }
+            catch (error) { reject(error); }
+          };
+          input.oncancel = () => resolve(null);
+          input.click();
+        });
+      },
+      // 同じサイトの中のファイルだけ（手元での確認用）。外部のURLは読まない。
+      async fromUrl(url) {
+        if (!url || /^[a-z]+:/i.test(url) || url.startsWith('//')) return null;
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        return finish(await parse(response.body), url);
+      },
+      async save(text) {
+        const db = await open();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put(text, 'data');
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+        });
+        db.close();
+      },
+      async load() {
+        const db = await open();
+        const value = await new Promise((resolve, reject) => {
+          const request = db.transaction(STORE).objectStore(STORE).get('data');
+          request.onsuccess = () => resolve(request.result ?? null);
+          request.onerror = () => reject(request.error);
+        });
+        db.close();
+        return value;
+      },
+    };
+  })();
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
