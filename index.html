@@ -137,7 +137,9 @@
         return new Promise((resolve, reject) => {
           const input = document.createElement('input');
           input.type = 'file';
-          input.accept = '.json,application/json';
+          // 種類で絞り込まない。iPhoneの「ファイル」では、Googleドライブ上の
+          // JSONが種類不明と扱われ、絞り込むと灰色になって選べないことがある。
+          // 中身が違えば読み込みのときに知らせる。
           input.onchange = async () => {
             const file = input.files && input.files[0];
             if (!file) { resolve(null); return; }
