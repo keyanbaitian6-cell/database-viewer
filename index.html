@@ -103,6 +103,7 @@
       if (section === 'whole') {
         whole.push(buffer);
         const doc = JSON.parse(whole.join(''));
+        if (doc && typeof doc.error === 'string') throw new Error(doc.error);
         if (!doc || !Array.isArray(doc.records)) {
           throw new Error('databaseのバックアップファイルではありません。');
         }
@@ -156,6 +157,28 @@
         const response = await fetch(url);
         if (!response.ok) return null;
         return finish(await parse(response.body), url);
+      },
+      // Googleのスクリプト（…/exec）から、Googleドライブの最新を読む。
+      // それ以外のURLは読まない。記録はこの端末にだけ届く。
+      async fromRemote(url) {
+        if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url || '')) {
+          throw new Error('GoogleのスクリプトのURL（https://script.google.com/macros/s/…/exec）を入れてください。');
+        }
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) throw new Error('Googleドライブから読めませんでした（' + response.status + '）。');
+        if ((response.headers.get('content-type') || '').includes('text/html')) {
+          throw new Error('スクリプトの公開設定を確認してください（アクセスできるユーザー：全員）。');
+        }
+        return finish(await parse(response.body), 'Googleドライブ（自動）');
+      },
+      getRemote() {
+        try { return localStorage.getItem('database-viewer-remote'); } catch (_) { return null; }
+      },
+      setRemote(url) {
+        try {
+          if (url) localStorage.setItem('database-viewer-remote', url);
+          else localStorage.removeItem('database-viewer-remote');
+        } catch (_) {}
       },
       async save(text) {
         const db = await open();
