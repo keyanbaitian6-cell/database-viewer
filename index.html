@@ -111,10 +111,11 @@
           header: { format: doc.format, exported_at: doc.exported_at, source: doc.source },
           records: doc.records.map(lighten),
           candidates: Array.isArray(doc.candidate_snapshots) ? doc.candidate_snapshots : [],
+          date_events: Array.isArray(doc.date_events) ? doc.date_events : [],
         };
       }
       handle(buffer);
-      return { header, records, candidates };
+      return { header, records, candidates, date_events: Array.isArray(header.date_events) ? header.date_events : [] };
     }
 
     function finish(result, name) {
