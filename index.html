@@ -26,8 +26,9 @@
 <body>
   <script>
   // バックアップ（database-backup 形式のJSON）を、この端末の中だけで読む。
-  // どこにも送らない。1行に1台の形は1行ずつ読み、グラフの画像と曲線は
-  // 読み飛ばす（iPhoneのメモリと保存領域を使いすぎないため）。
+  // どこにも送らない。1行に1台の形は1行ずつ読み、グラフの画像は読み飛ばす
+  // （iPhoneのメモリと保存領域を使いすぎないため）。グラフの線（曲線）は
+  // 画像の6分の1ほどと軽いので残し、画面で線を描く。
   // 読んだ結果は IndexedDB に覚え、次からは選び直さなくても開ける。
   window.databaseViewer = (() => {
     const DB = 'database-viewer';
@@ -37,7 +38,6 @@
       const graph = record && record.graph_measurement;
       if (graph && typeof graph === 'object') {
         delete graph.preview_image;
-        delete graph.curve;
         delete graph.preview_stored;
         delete graph.curve_stored;
       }
