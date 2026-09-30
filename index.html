@@ -52,7 +52,22 @@
       let section = 'header';
       let buffer = '';
       let whole = null; // 1行に1台の形でないとき、全文をためる
+      let streamedCandidates = false;
+      // 画像を保持せず外枠のJSONも検査する。各台の値だけをnullへ置き換える。
+      const structure = [];
       const recordsStart = /"records"\s*:\s*\[$/;
+
+      const validate = (doc) => {
+        if (doc && typeof doc.error === 'string') throw new Error(doc.error);
+        if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) {
+          throw new Error('databaseのバックアップファイルではありません。');
+        }
+        for (const key of ['candidate_snapshots', 'date_events']) {
+          if (key in doc && !Array.isArray(doc[key])) {
+            throw new Error(key + ' の形式が不正です。');
+          }
+        }
+      };
 
       const handle = (raw) => {
         const text = raw.trim();
@@ -70,43 +85,59 @@
           if (!header || header.format !== 'database-backup') {
             throw new Error('databaseのバックアップファイルではありません。');
           }
+          structure.push(text);
           section = 'records';
           return;
         }
-        if (text.startsWith(']')) {
-          section = section === 'records' && text.includes('"candidate_snapshots"') &&
-              text.endsWith('[') ? 'candidates' : 'done';
+        if (section === 'done') {
+          structure.push(text);
           return;
         }
-        if (section === 'done') return;
+        if (text.startsWith(']')) {
+          structure.push(text);
+          section = section === 'records' && text.includes('"candidate_snapshots"') &&
+              text.endsWith('[') ? 'candidates' : 'done';
+          if (section === 'candidates') streamedCandidates = true;
+          return;
+        }
         const item = JSON.parse(text.endsWith(',') ? text.slice(0, -1) : text);
+        structure.push(text.endsWith(',') ? 'null,' : 'null');
         if (section === 'records') records.push(lighten(item));
         else candidates.push(item);
       };
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (section === 'whole') { whole.push(value); continue; }
-        buffer += value;
-        let index;
-        while (section !== 'whole' && (index = buffer.indexOf('\n')) >= 0) {
-          handle(buffer.slice(0, index));
-          buffer = buffer.slice(index + 1);
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (section === 'whole') { whole.push(value); continue; }
+          buffer += value;
+          let index;
+          while (section !== 'whole' && (index = buffer.indexOf('\n')) >= 0) {
+            handle(buffer.slice(0, index));
+            buffer = buffer.slice(index + 1);
+          }
+          if (section === 'whole') { whole.push(buffer); buffer = ''; }
+          // 見出し行が来ないまま長くなったら、1行だけの以前の形とみなす。
+          if (section === 'header' && buffer.length > 1000000) {
+            whole = [buffer]; buffer = ''; section = 'whole';
+          }
         }
-        if (section === 'whole') { whole.push(buffer); buffer = ''; }
-        // 見出し行が来ないまま長くなったら、1行だけの以前の形とみなす。
-        if (section === 'header' && buffer.length > 1000000) {
-          whole = [buffer]; buffer = ''; section = 'whole';
+        // 改行で終わらない短いJSONも、全文形式へ切り替えてから処理する。
+        if (section !== 'whole') {
+          handle(buffer);
+          buffer = '';
         }
+      } catch (error) {
+        try { await reader.cancel(); } catch (_) {}
+        throw error;
+      } finally {
+        reader.releaseLock();
       }
       if (section === 'whole') {
         whole.push(buffer);
         const doc = JSON.parse(whole.join(''));
-        if (doc && typeof doc.error === 'string') throw new Error(doc.error);
-        if (!doc || !Array.isArray(doc.records)) {
-          throw new Error('databaseのバックアップファイルではありません。');
-        }
+        validate(doc);
         return {
           header: { format: doc.format, exported_at: doc.exported_at, source: doc.source },
           records: doc.records.map(lighten),
@@ -114,8 +145,21 @@
           date_events: Array.isArray(doc.date_events) ? doc.date_events : [],
         };
       }
-      handle(buffer);
-      return { header, records, candidates, date_events: Array.isArray(header.date_events) ? header.date_events : [] };
+      // EOFだけでは成功にしない。閉じ括弧、カンマ、余分な末尾文字も検査する。
+      const envelope = JSON.parse(structure.join('\n'));
+      validate(envelope);
+      if (envelope.records.length !== records.length || envelope.records.some(item => item !== null)) {
+        throw new Error('records が重複しているか、形式が不正です。');
+      }
+      if (streamedCandidates) {
+        if (envelope.candidate_snapshots.length !== candidates.length ||
+            envelope.candidate_snapshots.some(item => item !== null)) {
+          throw new Error('candidate_snapshots が重複しているか、形式が不正です。');
+        }
+      } else if (Array.isArray(envelope.candidate_snapshots)) {
+        for (const item of envelope.candidate_snapshots) candidates.push(item);
+      }
+      return { header, records, candidates, date_events: envelope.date_events || [] };
     }
 
     function finish(result, name) {
