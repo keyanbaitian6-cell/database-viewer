@@ -33,6 +33,9 @@
   window.databaseViewer = (() => {
     const DB = 'database-viewer';
     const STORE = 'kv';
+    // Driveの自動読み込みで、この時間なにも届かなければ打ち切る（電波が弱いとき
+    // に「読み込み中」のまま待ち続けないように）。届いている間は待つ。
+    const REMOTE_IDLE_MS = 30000;
 
     function lighten(record) {
       const graph = record && record.graph_measurement;
@@ -44,8 +47,11 @@
       return record;
     }
 
-    async function parse(stream) {
+    // [known] は表示中の内容の書き出し時刻。先頭の行の exported_at が同じなら、
+    // 中身も同じなので、そこで読むのをやめて { unchanged: true } を返す。
+    async function parse(stream, known) {
       const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+      let unchanged = false;
       const records = [];
       const candidates = [];
       let header = null;
@@ -85,6 +91,10 @@
           if (!header || header.format !== 'database-backup') {
             throw new Error('databaseのバックアップファイルではありません。');
           }
+          if (known && header.exported_at === known) {
+            unchanged = true;
+            return;
+          }
           structure.push(text);
           section = 'records';
           return;
@@ -113,15 +123,21 @@
           if (section === 'whole') { whole.push(value); continue; }
           buffer += value;
           let index;
-          while (section !== 'whole' && (index = buffer.indexOf('\n')) >= 0) {
+          while (section !== 'whole' && !unchanged && (index = buffer.indexOf('\n')) >= 0) {
             handle(buffer.slice(0, index));
             buffer = buffer.slice(index + 1);
           }
+          if (unchanged) break;
           if (section === 'whole') { whole.push(buffer); buffer = ''; }
           // 見出し行が来ないまま長くなったら、1行だけの以前の形とみなす。
           if (section === 'header' && buffer.length > 1000000) {
             whole = [buffer]; buffer = ''; section = 'whole';
           }
+        }
+        if (unchanged) {
+          // 残りは読まない（通信もここで止まる）。
+          try { await reader.cancel(); } catch (_) {}
+          return { unchanged: true, header };
         }
         // 改行で終わらない短いJSONも、全文形式へ切り替えてから処理する。
         if (section !== 'whole') {
@@ -138,6 +154,9 @@
         whole.push(buffer);
         const doc = JSON.parse(whole.join(''));
         validate(doc);
+        if (known && doc.exported_at === known) {
+          return { unchanged: true, header: { format: doc.format, exported_at: doc.exported_at } };
+        }
         return {
           header: { format: doc.format, exported_at: doc.exported_at, source: doc.source },
           records: doc.records.map(lighten),
@@ -205,16 +224,45 @@
       },
       // Googleのスクリプト（…/exec）から、Googleドライブの最新を読む。
       // それ以外のURLは読まない。記録はこの端末にだけ届く。
-      async fromRemote(url) {
+      // ファイルの書き出し時刻が [known]（表示中の内容の時刻）と同じなら、先頭の
+      // 1行だけで読むのをやめて null を返す。開くたびに同じ中身を丸ごと読み直すと、
+      // 通信と計算で電池を使うため。
+      async fromRemote(url, known) {
         if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url || '')) {
           throw new Error('GoogleのスクリプトのURL（https://script.google.com/macros/s/…/exec）を入れてください。');
         }
-        const response = await fetch(url, { cache: 'no-store' });
-        if (!response.ok) throw new Error('Googleドライブから読めませんでした（' + response.status + '）。');
-        if ((response.headers.get('content-type') || '').includes('text/html')) {
-          throw new Error('スクリプトの公開設定を確認してください（アクセスできるユーザー：全員）。');
+        const abort = new AbortController();
+        let timer = 0;
+        const wait = () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => abort.abort(), REMOTE_IDLE_MS);
+        };
+        wait();
+        try {
+          const response = await fetch(url, { cache: 'no-store', signal: abort.signal });
+          if (!response.ok) throw new Error('Googleドライブから読めませんでした（' + response.status + '）。');
+          if ((response.headers.get('content-type') || '').includes('text/html')) {
+            throw new Error('スクリプトの公開設定を確認してください（アクセスできるユーザー：全員）。');
+          }
+          wait();
+          // 届くたびに待ち時間を数え直す。
+          const body = response.body.pipeThrough(new TransformStream({
+            transform(chunk, controller) {
+              wait();
+              controller.enqueue(chunk);
+            },
+          }));
+          const result = await parse(body, known || null);
+          if (result.unchanged) return null;
+          return finish(result, 'Googleドライブ（自動）');
+        } catch (error) {
+          if (abort.signal.aborted) {
+            throw new Error('Googleドライブから' + REMOTE_IDLE_MS / 1000 + '秒間応答がなかったため、読み込みをやめました。');
+          }
+          throw error;
+        } finally {
+          clearTimeout(timer);
         }
-        return finish(await parse(response.body), 'Googleドライブ（自動）');
       },
       getRemote() {
         try { return localStorage.getItem('database-viewer-remote'); } catch (_) { return null; }
