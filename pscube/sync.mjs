@@ -52,7 +52,14 @@ export function driveUrl(base) {
  */
 export async function fetchDrive(base, known, { fetchImpl = fetch, timeoutMs = DRIVE_TIMEOUT_MS, retryDelays = DRIVE_RETRY_DELAYS_MS } = {}) {
   const url = driveUrl(base), controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timer = setTimeout(() => controller.abort(), timeoutMs);
+  // 画面を離れている間（iPhoneでほかのアプリに切り替えた等）は時間を数えない。戻ったら数え直す。
+  const page = globalThis.document ?? null;
+  const onVisibility = () => {
+    clearTimeout(timer);
+    if (page.visibilityState !== 'hidden') timer = setTimeout(() => controller.abort(), timeoutMs);
+  };
+  page?.addEventListener?.('visibilitychange', onVisibility);
   const pause = ms => new Promise((resolve, reject) => {
     const id = setTimeout(resolve, ms);
     controller.signal.addEventListener('abort', () => { clearTimeout(id); reject(Object.assign(new Error('abort'), { name: 'AbortError' })); }, { once: true });
@@ -83,5 +90,5 @@ export async function fetchDrive(base, known, { fetchImpl = fetch, timeoutMs = D
     const exportedAt = typeof doc.exported_at === 'string' ? doc.exported_at : null;
     if (known && exportedAt === known) return { unchanged: true, exportedAt };
     return { unchanged: false, exportedAt, data: validateData(doc) };
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); page?.removeEventListener?.('visibilitychange', onVisibility); }
 }

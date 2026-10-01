@@ -240,6 +240,14 @@
           clearTimeout(timer);
           timer = setTimeout(() => abort.abort(), REMOTE_IDLE_MS);
         };
+        // 画面を離れている間（iPhoneでほかのアプリに切り替えた等）は待ち時間を数えない。
+        // iPhoneは裏に回ったページの通信を止めるので、戻った瞬間に打ち切らないようにする。
+        const page = typeof document === 'undefined' ? null : document;
+        const onVisibility = () => {
+          if (page.visibilityState === 'hidden') clearTimeout(timer);
+          else wait();
+        };
+        if (page) page.addEventListener('visibilitychange', onVisibility);
         wait();
         try {
           let response;
@@ -282,6 +290,7 @@
           throw error;
         } finally {
           clearTimeout(timer);
+          if (page) page.removeEventListener('visibilitychange', onVisibility);
         }
       },
       getRemote() {
