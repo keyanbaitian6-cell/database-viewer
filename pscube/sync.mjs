@@ -5,6 +5,11 @@ import { validateData, recordKey } from './data.mjs';
 export const REMOTE_KEY = 'database-viewer-remote';   // メルヘンの閲覧ページと同じ（同じブラウザで共有）
 const SCRIPT_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
 export const DRIVE_TIMEOUT_MS = 60000;
+// Apps Scriptの中継先（script.googleusercontent.com）は、ときどき404を返す（2026-10-01の実測で
+// メルヘン・P’s CUBEとも12回中2回、間隔を空けても起きた）。404・429・5xx・通信失敗は、
+// 少し待って2回までやり直す。
+export const DRIVE_RETRY_DELAYS_MS = [1500, 3000];
+const retryable = status => status === 404 || status === 429 || status >= 500;
 
 const two = v => String(v).padStart(2, '0');
 
@@ -45,13 +50,29 @@ export function driveUrl(base) {
  * ファイルが違う（更新前のスクリプトがメルヘンの閲覧用ファイルを返した等）・読めないときは例外で、
  * 呼び出し側は何も変えない。
  */
-export async function fetchDrive(base, known, { fetchImpl = fetch, timeoutMs = DRIVE_TIMEOUT_MS } = {}) {
+export async function fetchDrive(base, known, { fetchImpl = fetch, timeoutMs = DRIVE_TIMEOUT_MS, retryDelays = DRIVE_RETRY_DELAYS_MS } = {}) {
   const url = driveUrl(base), controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const pause = ms => new Promise((resolve, reject) => {
+    const id = setTimeout(resolve, ms);
+    controller.signal.addEventListener('abort', () => { clearTimeout(id); reject(Object.assign(new Error('abort'), { name: 'AbortError' })); }, { once: true });
+  });
   try {
     let response;
-    try { response = await fetchImpl(url, { cache: 'no-store', signal: controller.signal, redirect: 'follow' }); }
-    catch (e) { throw new Error(e?.name === 'AbortError' ? 'Googleドライブの応答がありません（時間切れ）。' : 'Googleドライブに接続できません。'); }
+    for (let attempt = 0; ; attempt++) {
+      let failure = null;
+      try { response = await fetchImpl(url, { cache: 'no-store', signal: controller.signal, redirect: 'follow' }); }
+      catch (e) {
+        if (e?.name === 'AbortError' || controller.signal.aborted) throw new Error('Googleドライブの応答がありません（時間切れ）。');
+        failure = new Error('Googleドライブに接続できません。');
+      }
+      const again = failure || !response.ok && retryable(response.status);
+      if (!again || attempt >= retryDelays.length) {
+        if (failure) throw failure;
+        break;
+      }
+      try { await pause(retryDelays[attempt]); } catch { throw new Error('Googleドライブの応答がありません（時間切れ）。'); }
+    }
     if (!response.ok) throw new Error(`Googleドライブから読めませんでした（${response.status}）。`);
     let doc;
     try { doc = JSON.parse(await response.text()); } catch { throw new Error('Googleドライブの内容を読めません。'); }
