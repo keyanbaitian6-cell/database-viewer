@@ -245,9 +245,8 @@ function progress(data, machine, day) {
 }
 
 try {
-  const result = parsePage({url: location.href, html: document.documentElement.outerHTML});
-  return JSON.stringify({...result, source_url: location.href});
+  return JSON.stringify({...autoPageState(location.href, document), busy: !!window.__pscubeBusy, url: location.href});
 } catch (error) {
-  return JSON.stringify({error: String(error?.message ?? error)});
+  return JSON.stringify({ready: false, reason: String(error?.message ?? error), busy: !!window.__pscubeBusy});
 }
 })()

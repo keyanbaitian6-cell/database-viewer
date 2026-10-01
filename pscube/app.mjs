@@ -1,5 +1,5 @@
 import { readWebArchive } from './archive.mjs';
-import { emptyData, parsePage, validateData, mergeData, machineKey, progress } from './data.mjs';
+import { emptyData, parsePage, validateData, mergeData, machineKey, progress, noHits } from './data.mjs';
 import { REMOTE_KEY, backupFileName, buildBackup, fetchDrive } from './sync.mjs';
 import { scoreRecord, nextDayCandidates, bandOf, profileOf, SCORING_VERSION, MIN_SCORED_GAMES } from './scoring.mjs';
 
@@ -149,7 +149,7 @@ function render() {
   const marks = new Map((nextDay?.candidates ?? []).map(c => [c.record.rack, c.focus ? '★' : '☆']));
   $('records').replaceChildren(...state.records.map(r => {
     const card = element('article', null, 'record'), head = element('div', null, 'record-head');
-    head.append(element('h3', `${r.rack}番台${marks.has(r.rack) ? ` ${marks.get(r.rack)}` : ''}`), element('span', r.graph?.kind === 'daily' ? '詳細取得済' : '詳細未取得', `badge${r.graph?.kind === 'daily' ? ' done' : ''}`));
+    head.append(element('h3', `${r.rack}番台${marks.has(r.rack) ? ` ${marks.get(r.rack)}` : ''}`), element('span', r.graph?.kind === 'daily' ? '詳細取得済' : noHits(r) ? '当たり0回（詳細不要）' : '詳細未取得', `badge${r.graph?.kind === 'daily' || noHits(r) ? ' done' : ''}`));
     const stats = element('dl', null, 'stats');
     for (const [label, val] of [['BIG', r.bb], ['REG', r.rb], ['AT/ART', r.at_art], ['累計G', r.games], ['MY', r.my]]) {
       const div = element('div'); div.append(element('dt', label), element('dd', val.toLocaleString('ja-JP'))); stats.append(div);

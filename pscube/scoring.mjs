@@ -2,7 +2,7 @@
 // （lib/data_checks.dart）の考え方を、P’s CUBEのデータ（BB/RB・累計G・MY・グラフ）に
 // 合わせて移したもの。設計と採用値の理由は database/PSCUBE_SCORING.md。
 // 配点・係数は設計上の採用値で、設定や勝率を当てるものではない。
-import { machineKey } from './data.mjs';
+import { machineKey, noHits } from './data.mjs';
 
 export const SCORING_VERSION = 'pscube-2026-10-01-v1';
 export const NEXT_DAY_VERSION = 'pscube-2026-10-01-v1';
@@ -109,7 +109,11 @@ export function scoreRecord(row, data) {
   if (hold == null) reasons.push(`最大放出数の比較データ不足：中立${weights.hold / 2}点で補完`);
   let end = null, retention = null;
   const metrics = graphMetrics(graphOf(row));
-  if (!row.graph) reasons.push(`グラフ未取得：中立${(weights.end + weights.retention) / 2}点で補完`);
+  if (!row.graph && noHits(row)) {
+    // メルヘンv12と同じ：当たり0回でグラフの無い台は、終点・維持を0点（取った場合とほぼ同じ結果）。
+    end = 0; retention = 0;
+    reasons.push('当たり0回でグラフ省略：終点・維持は0点');
+  } else if (!row.graph) reasons.push(`グラフ未取得：中立${(weights.end + weights.retention) / 2}点で補完`);
   else if (!metrics) reasons.push('グラフ解析保留：中立点で補完');
   else if (metrics.end !== 0 && Math.abs(metrics.end) <= 1) reasons.push('グラフ終点がゼロ線付近：中立点で補完');
   else {
