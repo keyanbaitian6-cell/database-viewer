@@ -35,7 +35,7 @@
     const STORE = 'kv';
     // Driveの自動読み込みで、この時間なにも届かなければ打ち切る（電波が弱いとき
     // に「読み込み中」のまま待ち続けないように）。届いている間は待つ。
-    const REMOTE_IDLE_MS = 30000;
+    const REMOTE_IDLE_MS = 90000;
     // Googleのスクリプトの中継先は、ときどき404を返す（2026-10-01の実測で12回中2回、
     // 間隔に関係なく起きた）。404・429・5xx・通信失敗は、少し待って2回までやり直す。
     const REMOTE_RETRY_DELAYS_MS = [1500, 3000];
@@ -76,6 +76,9 @@
         if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) {
           throw notBackup(doc && doc.format);
         }
+        if (doc.version !== 1) {
+          throw new Error('対応していないバックアップのバージョンです。');
+        }
         for (const key of ['candidate_snapshots', 'date_events']) {
           if (key in doc && !Array.isArray(doc[key])) {
             throw new Error(key + ' の形式が不正です。');
@@ -96,9 +99,7 @@
           let head = text.slice(0, match.index).trimEnd();
           if (head.endsWith(',')) head = head.slice(0, -1);
           header = JSON.parse(head + '}');
-          if (!header || header.format !== 'database-backup') {
-            throw notBackup(header && header.format);
-          }
+          validate({ ...header, records: [] });
           if (known && header.exported_at === known) {
             unchanged = true;
             return;
@@ -204,6 +205,20 @@
       });
     }
 
+    const pscubeModule = () => import('./pscube/viewer_bridge.mjs');
+    const pscubeBridge = async () => (await pscubeModule()).createPscubeBridge();
+    async function pscubeActive() {
+      if (typeof indexedDB === 'undefined') return false;
+      const db = await open();
+      try {
+        return await new Promise((resolve, reject) => {
+          const request = db.transaction(STORE).objectStore(STORE).get('active_source');
+          request.onsuccess = () => resolve(request.result === 'pscube');
+          request.onerror = () => reject(request.error);
+        });
+      } finally { db.close(); }
+    }
+
     return {
       // ファイルを選んで読む。選ばなければ null。
       pick() {
@@ -216,7 +231,12 @@
           input.onchange = async () => {
             const file = input.files && input.files[0];
             if (!file) { resolve(null); return; }
-            try { resolve(finish(await parse(file.stream()), file.name)); }
+            try {
+              const head = await file.slice(0, 4096).text();
+              if (/\.webarchive$/i.test(file.name) || head.startsWith('bplist') || head.includes('WebMainResource') || /"format"\s*:\s*"pscube-viewer"/.test(head) || (/"rack"\s*:/.test(head) && /"graph"\s*:/.test(head))) {
+                resolve(await (await pscubeModule()).readPscubeFiles([file]));
+              } else resolve(finish(await parse(file.stream()), file.name));
+            }
             catch (error) { reject(error); }
           };
           input.oncancel = () => resolve(null);
@@ -236,6 +256,7 @@
       // 1行だけで読むのをやめて null を返す。開くたびに同じ中身を丸ごと読み直すと、
       // 通信と計算で電池を使うため。
       async fromRemote(url, known) {
+        if (await pscubeActive()) return (await pscubeBridge()).fromRemote(url, known);
         if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url || '')) {
           throw new Error('GoogleのスクリプトのURL（https://script.google.com/macros/s/…/exec）を入れてください。');
         }
@@ -308,16 +329,20 @@
         } catch (_) {}
       },
       async save(text) {
+        const pscube = JSON.parse(text).format === 'pscube-viewer';
+        if (pscube) await (await pscubeBridge()).save(text);
         const db = await open();
         await new Promise((resolve, reject) => {
           const tx = db.transaction(STORE, 'readwrite');
-          tx.objectStore(STORE).put(text, 'data');
+          if (!pscube) tx.objectStore(STORE).put(text, 'data');
+          tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
           tx.oncomplete = resolve;
           tx.onerror = () => reject(tx.error);
         });
         db.close();
       },
       async load() {
+        if (await pscubeActive()) return (await pscubeBridge()).load();
         const db = await open();
         const value = await new Promise((resolve, reject) => {
           const request = db.transaction(STORE).objectStore(STORE).get('data');
@@ -326,6 +351,14 @@
         });
         db.close();
         return value;
+      },
+      async exportBackup() { return (await pscubeBridge()).exportBackup(); },
+      async importGraph(text) { return (await pscubeBridge()).importGraph(text); },
+      async setSuffixEvent(scope, day, enabled) {
+        return (await pscubeBridge()).setSuffixEvent(scope, day, enabled);
+      },
+      async setPscubeType(scope, machine, type) {
+        return (await pscubeBridge()).setPscubeType(scope, machine, type);
       },
     };
   })();

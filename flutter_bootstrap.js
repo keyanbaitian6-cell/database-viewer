@@ -45,4 +45,4 @@ _flutter.buildConfig = {"engineRevision":"5d531788691ec3404cac0cee66ead4007b1773
 // 作るものは、登録されるとすぐ自分を解除するだけの中身になっていて、登録すると
 // 起動のたびに「登録→解除」の手順と、その完了待ちが入る（電池と起動時間の無駄）。
 // https://docs.flutter.dev/platform-integration/web/initialization
-_flutter.loader.load();
+_flutter.loader.load({config: {canvasKitBaseUrl: 'canvaskit/'}});

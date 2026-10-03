@@ -8,6 +8,73 @@ export function validDay(day) {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) &&
     Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0, 10) === day;
 }
+const graphSafe = value => Number.isSafeInteger(value) && Math.abs(value) <= 10000000;
+const graphDay = value => {
+  if (!Number.isSafeInteger(value) || !/^\d{8}$/.test(String(value))) fail('グラフの日付が不正です。');
+  const day = dayFromCompact(String(value));
+  if (!validDay(day)) fail('グラフの日付が不正です。');
+  return day;
+};
+
+/** P’s CUBEの連続グラフの元数値。各日の始点と終点の差がその日の差枚。 */
+export function netMedalsOfProbe(raw) {
+  const rack = typeof raw?.rack === 'string' && /^\d+$/.test(raw.rack) ? Number(raw.rack) : raw?.rack;
+  if (!raw || !Number.isSafeInteger(rack) || rack < 1 ||
+      !/^\d{8}$/.test(raw.day ?? '') || !raw.graph ||
+      !Array.isArray(raw.graph.datas?.g) || !Array.isArray(raw.graph.datas?.p) ||
+      raw.graph.datas.g.length < 1 || raw.graph.datas.g.length > 7 ||
+      raw.graph.datas.p.length > 50000) fail('P’s CUBEのグラフJSONではありません。');
+  const selectedDay = graphDay(Number(raw.day));
+  const factor = raw.graph.anjYUnit ?? 1;
+  if (!Number.isFinite(factor) || factor <= 0 || factor > 100000) fail('グラフの単位が不正です。');
+  const found = new Map(), fields = new Set();
+  for (const line of raw.graph.datas.g) {
+    const day = graphDay(line.YMD_biz), x = line.xField, y = line.yField;
+    if (day > selectedDay || found.has(day) || typeof x !== 'string' || typeof y !== 'string' ||
+        !/^out-\d+$/.test(x) || !/^value-\d+$/.test(y) || fields.has(y)) fail('グラフの日付・系列が不正です。');
+    fields.add(y);
+    const points = raw.graph.datas.p.filter(p => p && Object.hasOwn(p, x) && Object.hasOwn(p, y));
+    if (points.length < 2 || points.some((p, i) => !graphSafe(p[x]) || !graphSafe(p[y]) ||
+        (i && p[x] < points[i - 1][x]))) fail('グラフの元数値が不正です。');
+    const net = (points.at(-1)[y] - points[0][y]) * factor;
+    if (!Number.isSafeInteger(net) || Math.abs(net) > 1000000) fail('差枚の数値が不正です。');
+    found.set(day, net);
+  }
+  if (!found.has(selectedDay)) fail('選択日のグラフがありません。');
+  return found;
+}
+
+/** PC/Androidの台別ページ取得。サイト自身の認証済み通信を使い、差枚を同じ記録に載せる。
+ *
+ * 差枚の元データが取れない（通信失敗・拒否・形式の違い）ときも、台別の数値・グラフは今までどおり
+ * 返して保存させ、差枚は空欄のまま（0にしない）`net_warning` に理由を付ける。巡回を止めないため
+ * （利用者の選択、2026-10-03）。翌日以降にその台を開けば、過去6日分の差枚もそこで埋まる。 */
+export async function capturePageWithNet(page, site = window) {
+  const captured = parsePage(page);
+  const url = siteUrl(page.url);
+  if (!url.pathname.endsWith('nc-v06-001.php')) return captured;
+  const rack = Number(url.searchParams.get('cd_dai'));
+  const day = url.hash.slice(1);
+  try {
+    if (!site.api?.apikey || !site.api?.token || typeof site.jQuery?.ajax !== 'function') {
+      fail('サイトの通信の準備ができていません');
+    }
+    const response = await new Promise((resolve, reject) => {
+      site.jQuery.ajax({
+        url: 'nc-m06-003.php',
+        data: {cd_dai: String(rack), YMD_biz: day,
+          apikey: site.api.apikey, _i: site.api.token._i, _t: site.api.token._t},
+        dataType: 'json', timeout: 12000,
+      }).done(resolve).fail((xhr) => reject(new Error(`通信に失敗しました（HTTP ${xhr?.status ?? '?'}）`)));
+    });
+    const values = netMedalsOfProbe({rack, day, graph: response?.Graph?.src});
+    return validateData({...captured, records:captured.records.map(record => ({
+      ...record, ...(values.has(record.day) ? {net_medals: values.get(record.day)} : {}),
+    }))});
+  } catch (error) {
+    return {...captured, net_warning: `差枚は未取得：${String(error?.message ?? error).slice(0, 120)}`};
+  }
+}
 function dayFromCompact(s) {
   if (!/^\d{8}$/.test(s || '')) fail('営業日を特定できません。日付を選んで保存してください。');
   const day = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}`;
@@ -144,11 +211,16 @@ export function autoPageState(rawUrl, dom) {
   try { url = siteUrl(rawUrl); } catch {
     return { ready: false, reason: '対象のページではありません（人間確認・同意の画面なら手動で操作してください）' };
   }
-  const wait = reason => ({ ready: false, reason });
   const has = selector => !!dom.querySelector(selector);
+  // 人間確認・約款の同意の画面（hCaptchaの窓、または注意書き）。ここではONのまま待つ。
+  const challenge = has('iframe[src*="hcaptcha"]') ||
+    /ロボットでないこと|約款に同意して|私は人間です/.test(dom.body?.textContent ?? '');
+  if (challenge) return { ready: false, challenge: true, reason: '人間確認・同意の画面（手動で操作してください）' };
+  // 対象のページなのに表示がそろわない。続くときはサイトに止められた可能性がある（missing）。
+  const wait = reason => ({ ready: false, missing: true, reason });
   const path = url.pathname;
   if (path.endsWith('nc-v03-001.php')) {
-    if (url.searchParams.get('cd_ps') !== '2') return wait('スロットの機種一覧ではありません');
+    if (url.searchParams.get('cd_ps') !== '2') return { ready: false, reason: 'スロットの機種一覧ではありません' };
     if (!has('#ulKI a.btn-ki')) return wait('機種一覧の表示待ち（人間確認・同意の画面なら手動で操作してください）');
     const identity = new URL(url); identity.hash = '';
     return { ready: true, kind: '機種一覧', signature: identity.href };
@@ -160,11 +232,27 @@ export function autoPageState(rawUrl, dom) {
     const identity = new URL(url); identity.hash = '';
     return { ready: true, kind: '全台一覧', signature: identity.href };
   }
-  if (!/^#\d{8}$/.test(url.hash)) return wait('台別ページの日付がまだ決まっていません');
+  if (!/^#\d{8}$/.test(url.hash)) return { ready: false, reason: '台別ページの日付がまだ決まっていません' };
   if (dom.querySelectorAll('td.column').length !== 7) {
     return wait('台別7日分の表示待ち（人間確認・同意の画面なら手動で操作してください）');
   }
   return { ready: true, kind: '台別7日分', signature: url.href };
+}
+
+export const suffixEventKey = e => JSON.stringify([e.store, e.rate, e.day]);
+export function validateSuffixEvents(raw) {
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 100000) fail('末尾イベの印が不正です。');
+  const result = raw.map(e => {
+    if (!e || typeof e.store !== 'string' || !/^c\d+$/.test(e.store) ||
+        typeof e.rate !== 'string' || !/^\d+(?:\.\d+)?$/.test(e.rate) || !validDay(e.day) ||
+        typeof e.enabled !== 'boolean' || typeof e.updated_at !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(e.updated_at) ||
+        !Number.isFinite(Date.parse(e.updated_at))) fail('末尾イベの印が不正です。');
+    return {store:e.store, rate:e.rate, day:e.day, enabled:e.enabled, updated_at:e.updated_at};
+  });
+  if (new Set(result.map(suffixEventKey)).size !== result.length) fail('末尾イベの印が重複しています。');
+  return result;
 }
 
 export function validateData(raw) {
@@ -187,6 +275,7 @@ export function validateData(raw) {
     if (!integer(r.rack) || r.rack < 1 || !validDay(r.day) || !url.pathname.endsWith('nc-v06-001.php') ||
         url.searchParams.get('cd_dai') !== String(r.rack) || url.hash !== `#${r.day.replaceAll('-', '')}`) fail('台番号・営業日・リンクが一致しません。');
     for (const k of ['bb', 'rb', 'at_art', 'games', 'my']) if (!integer(r[k])) fail('台の数値が不正です。');
+    if (r.net_medals != null && (!Number.isSafeInteger(r.net_medals) || Math.abs(r.net_medals) > 1000000)) fail('差枚の数値が不正です。');
     let graph = null;
     if (r.graph != null) {
       const g = r.graph;
@@ -196,12 +285,24 @@ export function validateData(raw) {
     }
     if (r.observed_at != null && (typeof r.observed_at !== 'string' || !Number.isFinite(Date.parse(r.observed_at)))) fail('更新時刻が不正です。');
     return { ...base, rack: r.rack, day: r.day, bb: r.bb, rb: r.rb, at_art: r.at_art, games: r.games, my: r.my,
-      detail_url: url.href, observed_at: r.observed_at ?? null, graph };
+      detail_url: url.href, observed_at: r.observed_at ?? null, graph,
+      ...(r.net_medals == null ? {} : {net_medals: r.net_medals}) };
   });
   if (new Set(machines.map(machineKey)).size !== machines.length || new Set(records.map(recordKey)).size !== records.length) fail('同じ機種・台が重複しています。');
   const known = new Set(machines.map(machineKey));
   if (records.some(r => !known.has(machineKey(r)))) fail('台に対応する機種情報がありません。');
-  return { format: FORMAT, version: 1, machines, records };
+  const suffixEvents = validateSuffixEvents(raw.suffix_events);
+  return { format: FORMAT, version: 1, machines, records,
+    ...(suffixEvents.length ? {suffix_events:suffixEvents} : {}) };
+}
+
+export function mergeSuffixEvents(stored = [], incoming = []) {
+  const marks = new Map(stored.map(e => [suffixEventKey(e), e]));
+  for (const e of incoming) {
+    const previous = marks.get(suffixEventKey(e));
+    if (!previous || Date.parse(e.updated_at) >= Date.parse(previous.updated_at)) marks.set(suffixEventKey(e), e);
+  }
+  return [...marks.values()];
 }
 
 export function mergeData(stored, incoming) {
@@ -228,10 +329,18 @@ export function mergeData(stored, incoming) {
       graph = preferred.graph?.kind === 'daily' ? preferred.graph
         : alternate.graph?.kind === 'daily' ? alternate.graph : preferred.graph ?? alternate.graph;
     }
-    records.set(key, { ...preferred, graph });
+    const alternate = older ? r : previous;
+    records.set(key, { ...preferred, graph,
+      ...(sameNumbers && preferred.net_medals == null && alternate.net_medals != null ? {net_medals:alternate.net_medals} : {}) });
   }
-  return validateData({ ...emptyData(), machines: [...machines.values()], records: [...records.values()] });
+  // Marks are independent of machine/rack data. An explicit removal is retained
+  // as a dated false value so an older backup cannot bring the mark back.
+  return validateData({ ...emptyData(), machines: [...machines.values()], records: [...records.values()],
+    suffix_events:mergeSuffixEvents(old.suffix_events, fresh.suffix_events) });
 }
+
+/** 沖ドキ（「沖ドキ」「オキドキ」、半角も）は取り込みの対象外（メルヘンと同じ約束）。 */
+export const isExcludedMachine = name => /沖ドキ|オキドキ/.test(String(name ?? '').normalize('NFKC'));
 
 /** 当たりが1回もない台（BB・RB・AT/ARTがすべて0、0回転を含む）。台別7日分は取りに行かない（PC・Androidと同じ）。 */
 export const noHits = r => r.bb + r.rb + r.at_art === 0;
