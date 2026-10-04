@@ -36,9 +36,10 @@
     // Driveの自動読み込みで、この時間なにも届かなければ打ち切る（電波が弱いとき
     // に「読み込み中」のまま待ち続けないように）。届いている間は待つ。
     const REMOTE_IDLE_MS = 90000;
-    // Googleのスクリプトの中継先は、ときどき404を返す（2026-10-01の実測で12回中2回、
-    // 間隔に関係なく起きた）。404・429・5xx・通信失敗は、少し待って2回までやり直す。
-    const REMOTE_RETRY_DELAYS_MS = [1500, 3000];
+    // Googleのスクリプトの中継先は、ときどき返事が固まり、30〜90秒たってから404を返す
+    // （2026-10-04の実測で8回中4回）。返事が来ないときは8秒ごとに同じリクエストをもう1本出し、
+    // 先に成功した方を使う。404・429・5xx・通信失敗も、少し待って次を出す（最大4本）。
+    // 部品は drive_fetch.mjs（P’s CUBEの閲覧ページと共通）。
 
     function lighten(record) {
       const graph = record && record.graph_measurement;
@@ -260,6 +261,10 @@
         if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url || '')) {
           throw new Error('GoogleのスクリプトのURL（https://script.google.com/macros/s/…/exec）を入れてください。');
         }
+        // window.databaseDriveFetch は試験用の差し込み口（隔離環境では import() が使えない）。
+        const { hedgedFetch, checkVersion, versionStore, isUnchanged } =
+          (typeof window !== 'undefined' && window.databaseDriveFetch) || await import('./drive_fetch.mjs');
+        const versions = versionStore('meruhen');
         const abort = new AbortController();
         let timer = 0;
         const wait = () => {
@@ -275,39 +280,52 @@
         };
         if (page) page.addEventListener('visibilitychange', onVisibility);
         wait();
+        // リクエストを出すたびに、無応答の時間を数え直す。
+        const options = {
+          fetchImpl: (...args) => fetch(...args),
+          signal: abort.signal,
+          onLaunch: (index) => { if (index > 0) wait(); },
+        };
+        const httpError = (status) => new Error('Googleドライブから読めませんでした（' + status + '）。');
         try {
-          let response;
-          for (let attempt = 0; ; attempt++) {
-            let failure = null;
-            try {
-              response = await fetch(url, { cache: 'no-store', signal: abort.signal });
-            } catch (error) {
-              if (abort.signal.aborted) throw error;
-              failure = error;
+          let full;
+          let version = null;
+          try {
+            // 先に更新の目印だけを確かめる（新しいApps Scriptのとき数行の返事）。前に読んだときと
+            // 同じなら、ファイルは読まない。古いスクリプトは全文を返すので、そのまま使う。
+            const checked = await checkVersion(url + '?check=1', options);
+            version = checked.version ?? null;
+            if (isUnchanged(versions.get(), version, known || null)) return null;
+            if (checked.stream) full = { response: checked.response, stream: checked.stream };
+            else if (!checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
+            else {
+              const response = await hedgedFetch(url, options);
+              if (!response.ok) throw Object.assign(new Error('http'), { status: response.status });
+              full = { response, stream: response.body };
             }
-            const status = failure ? 0 : response.status;
-            const again = failure || (!response.ok && (status === 404 || status === 429 || status >= 500));
-            if (!again || attempt >= REMOTE_RETRY_DELAYS_MS.length) {
-              if (failure) throw failure;
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, REMOTE_RETRY_DELAYS_MS[attempt]));
-            wait();
+          } catch (error) {
+            if (abort.signal.aborted || error?.name === 'AbortError') throw error;
+            if (error && error.status) throw httpError(error.status);
+            throw error && error.network ? error.network : error;
           }
-          if (!response.ok) throw new Error('Googleドライブから読めませんでした（' + response.status + '）。');
-          if ((response.headers.get('content-type') || '').includes('text/html')) {
+          if ((full.response.headers.get('content-type') || '').includes('text/html')) {
             throw new Error('スクリプトの公開設定を確認してください（アクセスできるユーザー：全員）。');
           }
           wait();
           // 届くたびに待ち時間を数え直す。
-          const body = response.body.pipeThrough(new TransformStream({
+          const body = full.stream.pipeThrough(new TransformStream({
             transform(chunk, controller) {
               wait();
               controller.enqueue(chunk);
             },
           }));
           const result = await parse(body, known || null);
-          if (result.unchanged) return null;
+          // 目印は、中身を読み終えて正しいと分かってから覚える。
+          if (result.unchanged) {
+            if (version) versions.set({ version, exported_at: known });
+            return null;
+          }
+          if (version) versions.set({ version, exported_at: (result.header && result.header.exported_at) || null });
           return finish(result, 'Googleドライブ（自動）');
         } catch (error) {
           if (abort.signal.aborted) {
