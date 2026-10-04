@@ -230,13 +230,15 @@ export function autoPageState(rawUrl, dom) {
       return wait('全台一覧の表示待ち（人間確認・同意の画面なら手動で操作してください）');
     }
     const identity = new URL(url); identity.hash = '';
-    return { ready: true, kind: '全台一覧', signature: identity.href };
+    // day：選ばれている日付タブ。取り込み日を指定しているとき、合っているかの確認に使う。
+    const day = dayFromCompact(dom.querySelector('[data-ymd].selected').getAttribute('data-ymd'));
+    return { ready: true, kind: '全台一覧', signature: identity.href, day };
   }
   if (!/^#\d{8}$/.test(url.hash)) return { ready: false, reason: '台別ページの日付がまだ決まっていません' };
   if (dom.querySelectorAll('td.column').length !== 7) {
     return wait('台別7日分の表示待ち（人間確認・同意の画面なら手動で操作してください）');
   }
-  return { ready: true, kind: '台別7日分', signature: url.href };
+  return { ready: true, kind: '台別7日分', signature: url.href, day: dayFromCompact(url.hash.slice(1)) };
 }
 
 export const suffixEventKey = e => JSON.stringify([e.store, e.rate, e.day]);
