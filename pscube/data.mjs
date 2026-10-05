@@ -68,9 +68,9 @@ export async function capturePageWithNet(page, site = window) {
       }).done(resolve).fail((xhr) => reject(new Error(`通信に失敗しました（HTTP ${xhr?.status ?? '?'}）`)));
     });
     const values = netMedalsOfProbe({rack, day, graph: response?.Graph?.src});
-    return validateData({...captured, records:captured.records.map(record => ({
+    return {...captured, ...validateData({...captured, records:captured.records.map(record => ({
       ...record, ...(values.has(record.day) ? {net_medals: values.get(record.day)} : {}),
-    }))});
+    }))})};
   } catch (error) {
     return {...captured, net_warning: `差枚は未取得：${String(error?.message ?? error).slice(0, 120)}`};
   }
@@ -141,6 +141,7 @@ export function parsePage(page) {
   template.innerHTML = page.html;
   const dom = template.content;
   const data = emptyData();
+  const missingHistoryDays = [];
   if (url.pathname.endsWith('nc-v03-001.php')) {
     if (url.searchParams.get('cd_ps') !== '2') fail('スロットの機種一覧を保存してください。');
     for (const card of dom.querySelectorAll('#ulKI a.btn-ki')) {
@@ -190,14 +191,23 @@ export function parsePage(page) {
       const at = new Date(`${day}T00:00:00Z`); at.setUTCDate(at.getUTCDate() - i);
       const recordDay = at.toISOString().slice(0, 10);
       const link = new URL(url); link.hash = recordDay.replaceAll('-', '');
+      // 新台・入れ替え後は、過去の列の値がすべて空でグラフも無い。
+      // 本日と一部だけ欠けた列は読み込み途中の可能性があるため従来どおり拒否する。
+      const graphContainer = dom.querySelector(`#svg${i}`);
+      if (i > 0 && values.slice(1).every(value => value === '') &&
+          !graphContainer?.querySelector('path.amcharts-graph-stroke')) {
+        missingHistoryDays.push(recordDay);
+        return;
+      }
       data.records.push({ store, rate, machine, rack, day: recordDay, observed_at,
         bb: numberText(values[1]), rb: numberText(values[2]), at_art: numberText(values[3]),
         games: numberText(values[5]), my: numberText(values[6]), detail_url: link.href,
-        graph: extractGraph(dom.querySelector(`#svg${i}`), 'daily') });
+        graph: extractGraph(graphContainer, 'daily') });
     });
   }
   if (!data.records.length) fail('台の数値がありません。読み込み完了後に保存してください。');
-  return validateData(data);
+  return {...validateData(data),
+    ...(missingHistoryDays.length ? {missing_history_days: missingHistoryDays} : {})};
 }
 
 /**
