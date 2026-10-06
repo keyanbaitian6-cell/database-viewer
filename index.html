@@ -372,8 +372,8 @@
       },
       async exportBackup() { return (await pscubeBridge()).exportBackup(); },
       async importGraph(text) { return (await pscubeBridge()).importGraph(text); },
-      async setSuffixEvent(scope, day, enabled) {
-        return (await pscubeBridge()).setSuffixEvent(scope, day, enabled);
+      async setDateEvent(scope, day, name) {
+        return (await pscubeBridge()).setDateEvent(scope, day, name);
       },
       async setPscubeType(scope, machine, type) {
         return (await pscubeBridge()).setPscubeType(scope, machine, type);

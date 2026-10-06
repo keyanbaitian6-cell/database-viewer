@@ -1,5 +1,5 @@
 import {readWebArchive} from './archive.mjs';
-import {emptyData, validateData, mergeData, parsePage, validDay, machineKey, suffixEventKey, mergeSuffixEvents, validateSuffixEvents} from './data.mjs';
+import {emptyData, validateData, mergeData, parsePage, validDay, machineKey, dateEventKey, cleanEventName} from './data.mjs';
 import {applyGraphProbe} from './graph_probe.mjs';
 import {REMOTE_KEY, fetchDrive, buildBackup, backupFileName} from './sync.mjs';
 
@@ -78,11 +78,13 @@ export async function readPscubeFiles(files, existing) {
   }
   return envelope(data, {file: files.map(f => f.name).join('、'), exported_at: exportedAt});
 }
-// Read and update only the mark in one IDB transaction. Concurrent imports and
+// Read and update only the event in one IDB transaction. Concurrent imports and
 // other tabs cannot have their records replaced by a stale read of this page.
-async function setSuffixEvent(scope, day, enabled) {
+// name: 自由記入のイベント名。空・null は「イベントなし」（消した印として残す）。
+async function setDateEvent(scope, day, name) {
   const match = /^pscube:(c\d+):(\d+(?:\.\d+)?)$/.exec(scope ?? '');
-  if (!match || !validDay(day) || typeof enabled !== 'boolean') throw new Error('末尾イベの店舗・日付が不正です。');
+  if (!match || !validDay(day)) throw new Error('イベントの店舗・日付が不正です。');
+  const cleaned = cleanEventName(name);
   const [, store, rate] = match, db = await open();
   try {
     return await new Promise((resolve, reject) => {
@@ -94,25 +96,25 @@ async function setSuffixEvent(scope, day, enabled) {
           if (!data.result) throw new Error('先にデータを読み込んでください。');
           const valid = validateData(data.result);
           if (!valid.records.some(r => r.store === store && r.rate === rate && r.day === day)) throw new Error('この店舗・日付の記録がありません。');
-          const key = suffixEventKey({store,rate,day});
-          const previous = (valid.suffix_events ?? []).find(e => suffixEventKey(e) === key);
+          const key = dateEventKey({store,rate,day});
+          const previous = (valid.date_events ?? []).find(e => dateEventKey(e) === key);
           const updatedAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.updated_at) + 1 : 0)).toISOString();
-          updated = validateData({...valid, suffix_events:[
-            ...(valid.suffix_events ?? []).filter(e => suffixEventKey(e) !== key),
-            {store,rate,day,enabled,updated_at:updatedAt},
+          updated = validateData({...valid, date_events:[
+            ...(valid.date_events ?? []).filter(e => dateEventKey(e) !== key),
+            {store,rate,day,name:cleaned,updated_at:updatedAt},
           ]});
           state.put(updated, 'data');
         } catch (e) { failure = e; tx.abort(); }
       };
       tx.oncomplete = () => resolve(envelope(updated, meta.result ?? {}));
-      tx.onerror = tx.onabort = () => reject(failure || tx.error || new Error('印を端末に保存できませんでした。'));
+      tx.onerror = tx.onabort = () => reject(failure || tx.error || new Error('イベント名を端末に保存できませんでした。'));
     });
   } finally { db.close(); }
 }
 
 export function createPscubeBridge() {
   return {
-    setSuffixEvent,
+    setDateEvent,
     async importGraph(text) {
       const saved = await read();
       if (!saved.data) throw new Error('先にP’s CUBEのバックアップを読み込んでください。');

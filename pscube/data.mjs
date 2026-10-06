@@ -269,20 +269,64 @@ export function autoPageState(rawUrl, dom) {
   return { ready: true, kind: '台別7日分', signature: url.href, day: dayFromCompact(url.hash.slice(1)) };
 }
 
-export const suffixEventKey = e => JSON.stringify([e.store, e.rate, e.day]);
-export function validateSuffixEvents(raw) {
-  if (raw == null) return [];
-  if (!Array.isArray(raw) || raw.length > 100000) fail('末尾イベの印が不正です。');
-  const result = raw.map(e => {
-    if (!e || typeof e.store !== 'string' || !/^c\d+$/.test(e.store) ||
-        typeof e.rate !== 'string' || !/^\d+(?:\.\d+)?$/.test(e.rate) || !validDay(e.day) ||
-        typeof e.enabled !== 'boolean' || typeof e.updated_at !== 'string' ||
-        !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(e.updated_at) ||
-        !Number.isFinite(Date.parse(e.updated_at))) fail('末尾イベの印が不正です。');
-    return {store:e.store, rate:e.rate, day:e.day, enabled:e.enabled, updated_at:e.updated_at};
-  });
-  if (new Set(result.map(suffixEventKey)).size !== result.length) fail('末尾イベの印が重複しています。');
-  return result;
+export const dateEventKey = e => JSON.stringify([e.store, e.rate, e.day]);
+/** イベント名の最大文字数（メルヘンのイベント名と同じ60文字）。 */
+export const DATE_EVENT_MAX = 60;
+/** 末尾イベの印（以前の形）を読み替えるイベント名。 */
+export const SUFFIX_EVENT_NAME = '末尾イベ';
+const eventTime = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(v) && Number.isFinite(Date.parse(v));
+const eventScope = e => e && typeof e.store === 'string' && /^c\d+$/.test(e.store) &&
+  typeof e.rate === 'string' && /^\d+(?:\.\d+)?$/.test(e.rate) && validDay(e.day);
+/** イベント名を整える。空・60文字超・改行などの制御文字は使えない（null は「イベントなし」）。 */
+export function cleanEventName(name) {
+  if (name == null) return null;
+  if (typeof name !== 'string') fail('イベント名が不正です。');
+  const text = name.trim();
+  if (!text) return null;
+  if (text.length > DATE_EVENT_MAX || /[\u0000-\u001f\u007f]/.test(text)) fail(`イベント名は1〜${DATE_EVENT_MAX}文字で入力してください。`);
+  return text;
+}
+/** 同じ店舗・貸玉・日付は、更新時刻が新しい方（同じなら後から来た方）を残す。 */
+export function mergeDateEvents(stored = [], incoming = []) {
+  const events = new Map(stored.map(e => [dateEventKey(e), e]));
+  for (const e of incoming) {
+    const previous = events.get(dateEventKey(e));
+    if (!previous || Date.parse(e.updated_at) >= Date.parse(previous.updated_at)) events.set(dateEventKey(e), e);
+  }
+  return [...events.values()];
+}
+/**
+ * 日付ごとのイベント名（自由記入、2026-10-06）。{store, rate, day, name, updated_at}。name が null の
+ * 記録は「イベントを消した」印で、古いバックアップを読んでも消したイベントが戻らないよう残す。
+ * 以前の末尾イベの印（suffix_events、enabled）は「末尾イベ」という名前（外した印は null）に読み替える。
+ */
+export function validateDateEvents(raw, legacySuffix) {
+  const read = (list, convert, what) => {
+    if (list == null) return [];
+    if (!Array.isArray(list) || list.length > 100000) fail(`${what}が不正です。`);
+    const result = list.map(e => {
+      if (!eventScope(e) || !eventTime(e.updated_at)) fail(`${what}が不正です。`);
+      return {store:e.store, rate:e.rate, day:e.day, name:convert(e), updated_at:e.updated_at};
+    });
+    if (new Set(result.map(dateEventKey)).size !== result.length) fail(`${what}が重複しています。`);
+    return result;
+  };
+  const legacy = read(legacySuffix, e => {
+    if (typeof e.enabled !== 'boolean') fail('末尾イベの印が不正です。');
+    return e.enabled ? SUFFIX_EVENT_NAME : null;
+  }, '末尾イベの印');
+  const events = read(raw, e => cleanEventName(e.name), 'イベント名');
+  return mergeDateEvents(legacy, events);
+}
+/** 今までに付けたイベント名（新しく使った順、重複なし）。入力欄の候補に使う。 */
+export function dateEventNames(events = []) {
+  const latest = new Map();
+  for (const e of events) {
+    if (e.name == null) continue;
+    const time = Date.parse(e.updated_at);
+    if (!latest.has(e.name) || time > latest.get(e.name)) latest.set(e.name, time);
+  }
+  return [...latest].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja')).map(([name]) => name);
 }
 
 export function validateData(raw) {
@@ -321,18 +365,9 @@ export function validateData(raw) {
   if (new Set(machines.map(machineKey)).size !== machines.length || new Set(records.map(recordKey)).size !== records.length) fail('同じ機種・台が重複しています。');
   const known = new Set(machines.map(machineKey));
   if (records.some(r => !known.has(machineKey(r)))) fail('台に対応する機種情報がありません。');
-  const suffixEvents = validateSuffixEvents(raw.suffix_events);
+  const dateEvents = validateDateEvents(raw.date_events, raw.suffix_events);
   return { format: FORMAT, version: 1, machines, records,
-    ...(suffixEvents.length ? {suffix_events:suffixEvents} : {}) };
-}
-
-export function mergeSuffixEvents(stored = [], incoming = []) {
-  const marks = new Map(stored.map(e => [suffixEventKey(e), e]));
-  for (const e of incoming) {
-    const previous = marks.get(suffixEventKey(e));
-    if (!previous || Date.parse(e.updated_at) >= Date.parse(previous.updated_at)) marks.set(suffixEventKey(e), e);
-  }
-  return [...marks.values()];
+    ...(dateEvents.length ? {date_events:dateEvents} : {}) };
 }
 
 export function mergeData(stored, incoming) {
@@ -363,10 +398,10 @@ export function mergeData(stored, incoming) {
     records.set(key, { ...preferred, graph,
       ...(sameNumbers && preferred.net_medals == null && alternate.net_medals != null ? {net_medals:alternate.net_medals} : {}) });
   }
-  // Marks are independent of machine/rack data. An explicit removal is retained
-  // as a dated false value so an older backup cannot bring the mark back.
+  // Events are independent of machine/rack data. A removal is retained as a dated
+  // null name so an older backup cannot bring the event back.
   return validateData({ ...emptyData(), machines: [...machines.values()], records: [...records.values()],
-    suffix_events:mergeSuffixEvents(old.suffix_events, fresh.suffix_events) });
+    date_events:mergeDateEvents(old.date_events, fresh.date_events) });
 }
 
 /** 沖ドキ（「沖ドキ」「オキドキ」、半角も）は取り込みの対象外（メルヘンと同じ約束）。 */
