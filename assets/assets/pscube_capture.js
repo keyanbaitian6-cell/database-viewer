@@ -144,6 +144,8 @@ function parsePage(page) {
   const dom = template.content;
   const data = emptyData();
   const missingHistoryDays = [];
+  // 台別ページの1列目（サイトの「本日」）の日付。保存する側が7日分の範囲を確かめるのに使う。
+  let historyLatestDay = null;
   if (url.pathname.endsWith('nc-v03-001.php')) {
     if (url.searchParams.get('cd_ps') !== '2') fail('スロットの機種一覧を保存してください。');
     for (const card of dom.querySelectorAll('#ulKI a.btn-ki')) {
@@ -187,16 +189,31 @@ function parsePage(page) {
     if (!heading || Number(heading[1]) !== rack) fail('台番号とページの内容が一致しません。');
     const columns = [...dom.querySelectorAll('td.column')];
     if (columns.length !== 7) fail('7日分の表が揃っていません。');
+    // 列の日付は、その列のグラフ枠（CHART-yyyymmdd の中の svg{i}）から読む。台別ページの7列は、
+    // #以降の日付に関係なくサイトの「本日」から並ぶ（2026-10-06 実サイトで確認）。#以降を1列目の日付と
+    // みなすと、取り込み日を指定したとき、今日の途中の数値をその日として保存し、日付が1日ずつずれる。
+    const columnDays = columns.map((_, i) => {
+      const id = dom.querySelector(`#svg${i}`)?.closest('[id^="CHART-"]')?.id ?? '';
+      if (!/^CHART-\d{8}$/.test(id)) fail('日別の表の日付を確認できません。');
+      return dayFromCompact(id.slice(6));
+    });
+    columnDays.forEach((columnDay, i) => {
+      const at = new Date(`${columnDays[0]}T00:00:00Z`); at.setUTCDate(at.getUTCDate() - i);
+      if (columnDay !== at.toISOString().slice(0, 10)) fail('日別の表の日付が連続していません。');
+    });
+    if (!columnDays.includes(day)) fail('選んだ日がこの台の7日分にありません。');
+    historyLatestDay = columnDays[0];
     columns.forEach((column, i) => {
       const values = [...column.querySelectorAll(':scope > div > div')].map(text);
       if (values.length !== 8 || values[0] !== (i ? `${i}日前` : '本日')) fail('日別の表の並びを確認できません。');
-      const at = new Date(`${day}T00:00:00Z`); at.setUTCDate(at.getUTCDate() - i);
-      const recordDay = at.toISOString().slice(0, 10);
+      const recordDay = columnDays[i];
+      // 選んだ日より新しい列（営業中の今日など）は保存しない。
+      if (recordDay > day) return;
       const link = new URL(url); link.hash = recordDay.replaceAll('-', '');
       // 新台・入れ替え後は、過去の列の値がすべて空でグラフも無い。
-      // 本日と一部だけ欠けた列は読み込み途中の可能性があるため従来どおり拒否する。
+      // 選んだ日と一部だけ欠けた列は読み込み途中の可能性があるため従来どおり拒否する。
       const graphContainer = dom.querySelector(`#svg${i}`);
-      if (i > 0 && values.slice(1).every(value => value === '') &&
+      if (recordDay !== day && values.slice(1).every(value => value === '') &&
           !graphContainer?.querySelector('path.amcharts-graph-stroke')) {
         missingHistoryDays.push(recordDay);
         return;
@@ -209,7 +226,8 @@ function parsePage(page) {
   }
   if (!data.records.length) fail('台の数値がありません。読み込み完了後に保存してください。');
   return {...validateData(data),
-    ...(missingHistoryDays.length ? {missing_history_days: missingHistoryDays} : {})};
+    ...(missingHistoryDays.length ? {missing_history_days: missingHistoryDays} : {}),
+    ...(historyLatestDay ? {history_latest_day: historyLatestDay} : {})};
 }
 
 /**
