@@ -371,6 +371,13 @@
         return value;
       },
       async exportBackup() { return (await pscubeBridge()).exportBackup(); },
+      // 文字をファイルとして保存する（メルヘンのイベントの書き出し、EVENT_CALENDAR.md）。
+      download(name, text) {
+        const blob = new Blob([text], { type: 'application/json' });
+        const url = URL.createObjectURL(blob), a = document.createElement('a');
+        a.href = url; a.download = name; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      },
       async importGraph(text) { return (await pscubeBridge()).importGraph(text); },
       async setDateEvent(scope, day, name) {
         return (await pscubeBridge()).setDateEvent(scope, day, name);

@@ -175,6 +175,9 @@ export const bandOf = rank => rank == null ? '比較不足' : rank >= 0.75 ? '�
 export function compareEvidence(a, b) {
   const byIndex = fixed9(b.rawIndex) - fixed9(a.rawIndex);
   if (byIndex) return byIndex;
+  // 同じ指数なら、その日の回転数が多い台を上（利用者、2026-10-07）。Dart `compareNextDayEvidence` と同じ。
+  const byGames = (b.record.games ?? 0) - (a.record.games ?? 0);
+  if (byGames) return byGames;
   if (b.usedDays !== a.usedDays) return b.usedDays - a.usedDays;
   if (b.latestUsed !== a.latestUsed) return a.latestUsed > b.latestUsed ? -1 : 1;
   return a.record.rack - b.record.rack;
