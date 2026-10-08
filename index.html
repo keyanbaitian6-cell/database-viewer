@@ -387,6 +387,9 @@
       async setDateEvent(scope, day, name) {
         return (await pscubeBridge()).setDateEvent(scope, day, name);
       },
+      async setDateEventDays(scope, days, name) {
+        return (await pscubeBridge()).setDateEventDays(scope, days, name);
+      },
       async setPscubeType(scope, machine, type) {
         return (await pscubeBridge()).setPscubeType(scope, machine, type);
       },

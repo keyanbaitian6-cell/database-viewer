@@ -83,8 +83,19 @@ export async function readPscubeFiles(files, existing) {
 // other tabs cannot have their records replaced by a stale read of this page.
 // name: 自由記入のイベント名。空・null は「イベントなし」（消した印として残す）。
 async function setDateEvent(scope, day, name) {
+  return setEventDays(scope, [day], name, true);
+}
+// イベントカレンダー（2026-10-08）：先の日・期間にも同じ名前を付ける。店舗・貸玉の記録があればよい
+// （その日の記録は要らない。PC版 set_date_event_days と同じ）。名前の変わらない日は時刻を変えない。
+async function setDateEventDays(scope, days, name) {
+  return setEventDays(scope, days, name, false);
+}
+const EVENT_DAYS_MAX = 62;
+async function setEventDays(scope, days, name, needDayRecords) {
   const match = /^pscube:(c\d+):(\d+(?:\.\d+)?)$/.exec(scope ?? '');
-  if (!match || !validDay(day)) throw new Error('イベントの店舗・日付が不正です。');
+  if (!match || !Array.isArray(days) || !days.length || days.length > EVENT_DAYS_MAX || !days.every(validDay)) {
+    throw new Error('イベントの店舗・日付が不正です。');
+  }
   const cleaned = cleanEventName(name);
   const [, store, rate] = match, db = await open();
   try {
@@ -96,14 +107,20 @@ async function setDateEvent(scope, day, name) {
         try {
           if (!data.result) throw new Error('先にデータを読み込んでください。');
           const valid = validateData(data.result);
-          if (!valid.records.some(r => r.store === store && r.rate === rate && r.day === day)) throw new Error('この店舗・日付の記録がありません。');
-          const key = dateEventKey({store,rate,day});
-          const previous = (valid.date_events ?? []).find(e => dateEventKey(e) === key);
-          const updatedAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.updated_at) + 1 : 0)).toISOString();
-          updated = validateData({...valid, date_events:[
-            ...(valid.date_events ?? []).filter(e => dateEventKey(e) !== key),
-            {store,rate,day,name:cleaned,updated_at:updatedAt},
-          ]});
+          const scoped = valid.records.filter(r => r.store === store && r.rate === rate);
+          if (!scoped.length || (needDayRecords && !days.every(day => scoped.some(r => r.day === day)))) {
+            throw new Error('この店舗・日付の記録がありません。');
+          }
+          const events = new Map((valid.date_events ?? []).map(e => [dateEventKey(e), e]));
+          for (const day of days) {
+            const key = dateEventKey({store,rate,day});
+            const previous = events.get(key);
+            if (previous && previous.name === cleaned) continue;
+            if (!previous && cleaned == null) continue;
+            const updatedAt = new Date(Math.max(Date.now(), previous ? Date.parse(previous.updated_at) + 1 : 0)).toISOString();
+            events.set(key, {store,rate,day,name:cleaned,updated_at:updatedAt});
+          }
+          updated = validateData({...valid, date_events:[...events.values()]});
           state.put(updated, 'data');
         } catch (e) { failure = e; tx.abort(); }
       };
@@ -138,6 +155,7 @@ async function mergeShared(text) {
 export function createPscubeBridge() {
   return {
     setDateEvent,
+    setDateEventDays,
     // 共有カレンダー（P’s CUBEのページは、この橋渡しをそのまま databaseViewer に使う）。
     fetchShared,
     postShared,
