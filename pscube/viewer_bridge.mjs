@@ -1,7 +1,8 @@
 import {readWebArchive} from './archive.mjs';
-import {emptyData, validateData, mergeData, parsePage, validDay, machineKey, dateEventKey, cleanEventName} from './data.mjs';
+import {emptyData, validateData, mergeData, parsePage, validDay, machineKey, dateEventKey, cleanEventName, mergeDateEvents, validateDateEvents} from './data.mjs';
 import {applyGraphProbe} from './graph_probe.mjs';
 import {REMOTE_KEY, fetchDrive, buildBackup, backupFileName} from './sync.mjs';
+import {fetchShared, postShared} from '../shared_events.mjs';
 
 // Reuse the old database and keys so the already imported records survive.
 const open = () => new Promise((resolve, reject) => {
@@ -112,9 +113,38 @@ async function setDateEvent(scope, day, name) {
   } finally { db.close(); }
 }
 
+// 共有カレンダー（EVENT_CALENDAR.md、2026-10-08）：送るイベント（端末の date_events）。
+async function timedEvents() {
+  const saved = await read();
+  return JSON.stringify(saved.data ? validateData(saved.data).date_events ?? [] : []);
+}
+// 共有ファイル（{format: 'database-events', events}）のイベントを端末に足す。変わらなければ null。
+async function mergeShared(text) {
+  let incoming;
+  try {
+    const doc = JSON.parse(text);
+    if (!doc || doc.format !== 'database-events' || !Array.isArray(doc.events)) return null;
+    incoming = validateDateEvents(doc.events);
+  } catch { return null; }
+  const saved = await read();
+  if (!saved.data) return null;
+  const valid = validateData(saved.data);
+  const merged = validateData({...valid, date_events:mergeDateEvents(valid.date_events ?? [], incoming)});
+  if (JSON.stringify(merged.date_events ?? []) === JSON.stringify(valid.date_events ?? [])) return null;
+  await write(merged, saved.meta);
+  return envelope(merged, saved.meta);
+}
+
 export function createPscubeBridge() {
   return {
     setDateEvent,
+    // 共有カレンダー（P’s CUBEのページは、この橋渡しをそのまま databaseViewer に使う）。
+    fetchShared,
+    postShared,
+    pscubeEvents: timedEvents,
+    mergePscubeShared: mergeShared,
+    timedEvents,
+    mergeShared,
     async importGraph(text) {
       const saved = await read();
       if (!saved.data) throw new Error('先にP’s CUBEのバックアップを読み込んでください。');

@@ -371,6 +371,11 @@
         return value;
       },
       async exportBackup() { return (await pscubeBridge()).exportBackup(); },
+      // 共有カレンダー（EVENT_CALENDAR.md、2026-10-08）：共有ファイルを読む・イベントを送る（web/shared_events.mjs）。
+      async fetchShared(url, file) { return (await import('./shared_events.mjs')).fetchShared(url, file); },
+      async postShared(url, text) { return (await import('./shared_events.mjs')).postShared(url, text); },
+      async pscubeEvents() { return (await pscubeBridge()).timedEvents(); },
+      async mergePscubeShared(text) { return (await pscubeBridge()).mergeShared(text); },
       // 文字をファイルとして保存する（メルヘンのイベントの書き出し、EVENT_CALENDAR.md）。
       download(name, text) {
         const blob = new Blob([text], { type: 'application/json' });
