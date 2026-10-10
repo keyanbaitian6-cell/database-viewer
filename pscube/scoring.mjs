@@ -126,7 +126,7 @@ export function scoreRecord(row, data) {
   const missing = parts.filter(p => p[1] == null).reduce((v, p) => v + p[2], 0);
   const observed = parts.reduce((v, p) => v + (p[1] ?? 0), 0);
   const provisional = missing > 0 || row.games < SHRINK_GAMES || refs.length < MIN_REFS || days < SHRINK_DAYS;
-  if (provisional) reasons.push('少数データ・欠測を含む暫定評価');
+  if (provisional) reasons.push('少数データ・欠測を含む評価');
   reasons.push(`比較${refs.length}件/${days}日・観測${row.games}G`);
   if (missing > 0) reasons.push(`評価可能配点${100 - missing}/100・欠測による幅${round1(observed).toFixed(1)}〜${round1(observed + missing).toFixed(1)}（信頼区間ではありません）`);
   return { ...base, parts: { hit, hold, end, retention }, total: round1(observed + missing / 2), provisional,
