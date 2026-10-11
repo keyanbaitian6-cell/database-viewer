@@ -3,7 +3,8 @@
 import { hedgedFetch } from './drive_fetch.mjs';
 
 const SCRIPT_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
-export const SHARED_FILES = ['events', 'pscube-events'];
+// rainbow：閲覧ページで付け外しした🌈（RAINBOW.md「iPhoneから付ける」、2026-10-11）。
+export const SHARED_FILES = ['events', 'pscube-events', 'rainbow'];
 const POST_TIMEOUT_MS = 30000;
 
 /** 共有ファイル（[file] は events・pscube-events）を読み、返事の文字をそのまま返す。 */
