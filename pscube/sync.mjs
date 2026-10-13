@@ -1,6 +1,7 @@
 // P’s CUBE のバックアップ書き出しとGoogleドライブの自動読み込み（仕様：database/PSCUBE_SYNC.md）。
 // ドライブの読み込みは、メルヘンの閲覧ページと同じGoogle Apps ScriptのURLに ?file=pscube を付けて使う。
 import { validateData, recordKey } from './data.mjs';
+import {fetchViewerParts} from '../viewer_parts.mjs';
 import { DRIVE_RETRY_DELAYS_MS, HEDGE_AFTER_MS, checkVersion, hedgedFetch, isUnchanged, versionStore } from '../drive_fetch.mjs';
 
 export const REMOTE_KEY = 'database-viewer-remote';   // メルヘンの閲覧ページと同じ（同じブラウザで共有）
@@ -83,7 +84,13 @@ export async function fetchDrive(base, known, {
       version = checked.version ?? null;
       if (isUnchanged(versions.get(), version, known)) return { unchanged: true, exportedAt: known };
       // 古いスクリプトが全文を返したときは、それをそのまま使う。
-      if (checked.stream) text = await new Response(checked.stream).text();
+      if (checked.parts && globalThis.crypto?.subtle) {
+        text = JSON.stringify(await fetchViewerParts(url, 'pscube', checked.parts, async request => {
+          const response = await hedgedFetch(request, options);
+          if (!response.ok) throw Object.assign(new Error('http'), {status: response.status});
+          return response.json();
+        }));
+      } else if (checked.stream) text = await new Response(checked.stream).text();
       else if (checked.response && !checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
       if (text === undefined) {
         const response = await hedgedFetch(url, options);

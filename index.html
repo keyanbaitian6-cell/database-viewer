@@ -296,7 +296,16 @@
             const checked = await checkVersion(url + '?check=1', options);
             version = checked.version ?? null;
             if (isUnchanged(versions.get(), version, known || null)) return null;
-            if (checked.stream) full = { response: checked.response, stream: checked.stream };
+            if (checked.parts && globalThis.crypto?.subtle) {
+              const {fetchViewerParts} = await import('./viewer_parts.mjs');
+              const doc = await fetchViewerParts(url, 'meruhen', checked.parts, async request => {
+                wait(); const response = await hedgedFetch(request, options);
+                if (!response.ok) throw Object.assign(new Error('http'), {status: response.status});
+                return response.json();
+              });
+              const response = new Response(JSON.stringify(doc), {headers: {'content-type': 'application/json'}});
+              full = {response, stream: response.body};
+            } else if (checked.stream) full = { response: checked.response, stream: checked.stream };
             else if (!checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
             else {
               const response = await hedgedFetch(url, options);

@@ -133,7 +133,7 @@ export async function checkVersion(checkUrl, options) {
   const { head, stream } = await peekBody(response);
   if (head.startsWith(`{"format":"${CHECK_FORMAT}"`)) {
     const doc = JSON.parse(await new Response(stream).text());
-    return { version: doc.version == null ? null : String(doc.version), response };
+    return { version: doc.version == null ? null : String(doc.version), ...(doc.parts ? {parts: doc.parts} : {}), response };
   }
   return { stream, response };
 }
