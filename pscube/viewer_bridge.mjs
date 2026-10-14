@@ -3,6 +3,7 @@ import {emptyData, validateData, mergeData, parsePage, validDay, machineKey, dat
 import {applyGraphProbe} from './graph_probe.mjs';
 import {REMOTE_KEY, fetchDrive, buildBackup, backupFileName} from './sync.mjs';
 import {fetchShared, postShared} from '../shared_events.mjs';
+import {rememberViewerHistory} from '../viewer_parts.mjs';
 
 // Reuse the old database and keys so the already imported records survive.
 const open = () => new Promise((resolve, reject) => {
@@ -189,6 +190,8 @@ export function createPscubeBridge() {
       return envelope(validateData(doc), {file: url, exported_at: doc.exported_at});
     },
     async fromRemote(url, known) {
+      const saved = (await read()).data;
+      if (saved) await rememberViewerHistory(url, 'pscube', saved);
       const result = await fetchDrive(url, known);
       if (result.unchanged) return null;
       const old = (await read()).data;

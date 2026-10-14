@@ -172,6 +172,7 @@
           records: doc.records.map(lighten),
           candidates: Array.isArray(doc.candidate_snapshots) ? doc.candidate_snapshots : [],
           date_events: Array.isArray(doc.date_events) ? doc.date_events : [],
+          ...(Array.isArray(doc.history_days) ? {history_days: doc.history_days} : {}),
         };
       }
       // EOFだけでは成功にしない。閉じ括弧、カンマ、余分な末尾文字も検査する。
@@ -297,7 +298,9 @@
             version = checked.version ?? null;
             if (isUnchanged(versions.get(), version, known || null)) return null;
             if (checked.parts && globalThis.crypto?.subtle) {
-              const {fetchViewerParts} = await import('./viewer_parts.mjs');
+              const {fetchViewerParts, rememberViewerHistory} = await import('./viewer_parts.mjs');
+              const saved = await window.databaseViewer.load();
+              if (saved) await rememberViewerHistory(url, 'meruhen', JSON.parse(saved));
               const doc = await fetchViewerParts(url, 'meruhen', checked.parts, async request => {
                 wait(); const response = await hedgedFetch(request, options);
                 if (!response.ok) throw Object.assign(new Error('http'), {status: response.status});

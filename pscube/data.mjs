@@ -330,7 +330,11 @@ export function dateEventNames(events = []) {
 }
 
 export function validateData(raw) {
-  if (raw?.format !== FORMAT || raw.version !== 1 || !Array.isArray(raw.machines) || !Array.isArray(raw.records) || raw.records.length > 100000 || raw.machines.length > 10000) fail('P’s CUBEの保存ファイルではありません。');
+  if (raw?.format !== FORMAT || raw.version !== 1 || !Array.isArray(raw.machines) || !Array.isArray(raw.records) || (raw.history !== true && raw.records.length > 100000) || raw.machines.length > 10000) fail('P’s CUBEの保存ファイルではありません。');
+  if (raw.history === true) {
+    const days = new Map();
+    for (const r of raw.records) { const n = (days.get(r?.day) || 0) + 1; if (n > 100000) fail('1日分の記録が多すぎます。'); days.set(r?.day, n); }
+  }
   const basic = r => {
     if (!r || !/^c\d+$/.test(r.store) || typeof r.rate !== 'string' || !/^\d+(?:\.\d+)?$/.test(r.rate) ||
         typeof r.machine !== 'string' || !r.machine.trim() || r.machine.length > 200) fail('店舗・貸玉・機種名が不正です。');
@@ -366,7 +370,10 @@ export function validateData(raw) {
   const known = new Set(machines.map(machineKey));
   if (records.some(r => !known.has(machineKey(r)))) fail('台に対応する機種情報がありません。');
   const dateEvents = validateDateEvents(raw.date_events, raw.suffix_events);
-  return { format: FORMAT, version: 1, machines, records,
+  if (raw.history_days != null && (!Array.isArray(raw.history_days) || !raw.history_days.every(validDay) ||
+      new Set(raw.history_days).size !== raw.history_days.length)) fail('履歴の日付一覧が不正です。');
+  return { format: FORMAT, version: 1, machines, records, ...(raw.history === true ? {history: true} : {}),
+    ...(raw.history_days ? {history_days: raw.history_days} : {}),
     ...(dateEvents.length ? {date_events:dateEvents} : {}) };
 }
 
@@ -378,7 +385,8 @@ export function mergeData(stored, incoming) {
     machines.set(machineKey(m), { ...m, expected_count: m.expected_count ?? previous?.expected_count ?? null,
       machine_type: m.machine_type ?? previous?.machine_type ?? null });
   }
-  const records = new Map(old.records.map(r => [recordKey(r), r]));
+  const completeDays = new Set(fresh.history_days || []), freshKeys = new Set(fresh.records.map(recordKey));
+  const records = new Map(old.records.filter(r => !completeDays.has(r.day) || freshKeys.has(recordKey(r))).map(r => [recordKey(r), r]));
   for (const r of fresh.records) {
     const key = recordKey(r), previous = records.get(key);
     if (!previous) { records.set(key, r); continue; }
@@ -400,7 +408,8 @@ export function mergeData(stored, incoming) {
   }
   // Events are independent of machine/rack data. A removal is retained as a dated
   // null name so an older backup cannot bring the event back.
-  return validateData({ ...emptyData(), machines: [...machines.values()], records: [...records.values()],
+  return validateData({ ...emptyData(), ...(old.history || fresh.history ? {history: true} : {}), machines: [...machines.values()], records: [...records.values()],
+    ...(old.history_days || fresh.history_days ? {history_days: [...new Set([...(old.history_days || []), ...(fresh.history_days || [])])]} : {}),
     date_events:mergeDateEvents(old.date_events, fresh.date_events) });
 }
 

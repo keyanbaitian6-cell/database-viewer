@@ -14,24 +14,30 @@ function vpManifestName(site) { return 'database-viewer-parts-' + site + '.json'
 function vpPartName(site, hash) { return 'database-viewer-part-' + site + '-' + hash + '.json'; }
 function vpValidManifest(m, site) {
   const fail = () => { throw new Error('閲覧用の更新一覧が不正です。'); };
-  if (!m || m.format !== VP_FORMAT || m.version !== 1 || m.site !== site ||
+  if (!m || m.format !== VP_FORMAT || ![1, 2].includes(m.version) || m.site !== site ||
       !['meruhen', 'pscube'].includes(site) || !/^[a-f0-9]{64}$/.test(m.revision) ||
       !m.header || typeof m.header !== 'object' || Array.isArray(m.header) || 'records' in m.header ||
       m.header.version !== 1 || m.header.format !== (site === 'meruhen' ? 'database-backup' : 'pscube-viewer') ||
-      typeof m.header.exported_at !== 'string' || !Array.isArray(m.parts) || m.parts.length > 1024) fail();
-  const seen = new Set(); let bytes = 0, count = 0;
+      typeof m.header.exported_at !== 'string' || !Array.isArray(m.parts) || m.parts.length > (m.version === 2 ? 16384 : 1024)) fail();
+  const seen = new Set(), days = new Map(); let bytes = 0, count = 0;
   for (const p of m.parts) {
     if (!p || !/^[a-f0-9]{64}$/.test(p.hash) || seen.has(p.hash) ||
         !/^\d{4}-\d{2}-\d{2}$/.test(p.day) || !Number.isSafeInteger(p.count) || p.count < 1 ||
         !Number.isSafeInteger(p.bytes) || p.bytes < 2 || p.bytes > VP_PART_BYTES) fail();
     seen.add(p.hash); bytes += p.bytes; count += p.count;
+    const d = days.get(p.day) || {bytes: 0, count: 0}; d.bytes += p.bytes; d.count += p.count; days.set(p.day, d);
   }
-  if (bytes > VP_MAX_BYTES || count > 100000 || count !== m.count) fail();
+  if (count !== m.count || !Number.isSafeInteger(count)) fail();
+  if (m.version === 1 && (bytes > VP_MAX_BYTES || count > 100000)) fail();
+  if (m.version === 2 && (!Array.isArray(m.days) || new Set(m.days).size !== m.days.length ||
+      m.days.some(day => !/^\d{4}-\d{2}-\d{2}$/.test(day)) ||
+      [...days].some(([day, d]) => !m.days.includes(day) || d.bytes > VP_MAX_BYTES || d.count > 100000))) fail();
   return m;
 }
 function vpPublic(m) {
   return {format: m.format, version: m.version, site: m.site, revision: m.revision,
-    header: m.header, count: m.count, parts: m.parts.map(({hash, day, count, bytes}) => ({hash, day, count, bytes}))};
+    header: m.header, count: m.count, ...(m.version === 2 ? {days: m.days, history: true} : {}),
+    parts: m.parts.map(({hash, day, count, bytes}) => ({hash, day, count, bytes}))};
 }
 function vpRows(text, part) {
   const rows = JSON.parse(text);
@@ -41,36 +47,118 @@ function vpRows(text, part) {
   return rows;
 }
 
-// IndexedDBは消えることがある。キャッシュが無ければ全パーツを取り直す。
-// 完成した一覧だけを1トランザクションで保存し、途中の失敗で前回分を壊さない。
+// v1のsnapshotsを保持したまま、日別の履歴へ移行する。取得・検査が完了してから確定する。
 function vpCache() {
   async function run(key, value, writing) {
-    if (!globalThis.indexedDB) return null;
+    if (!globalThis.indexedDB) {
+      if (writing) throw new Error('端末の保存領域を利用できません。');
+      return null;
+    }
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open('database-viewer-parts-v1', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('snapshots');
+      const request = indexedDB.open('database-viewer-parts-v1', 2);
+      request.onupgradeneeded = () => {
+        for (const name of ['snapshots', 'history-heads', 'history-days']) {
+          if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name);
+        }
+      };
       request.onerror = () => reject(request.error);
       request.onblocked = () => reject(new Error('cache blocked'));
       request.onsuccess = () => {
-        const db = request.result, tx = db.transaction('snapshots', writing ? 'readwrite' : 'readonly');
-        const op = writing ? tx.objectStore('snapshots').put(value, key) : tx.objectStore('snapshots').get(key);
-        tx.oncomplete = () => { db.close(); resolve(writing ? null : op.result); };
+        const db = request.result, tx = db.transaction(['snapshots', 'history-heads', 'history-days'], writing ? 'readwrite' : 'readonly');
+        const heads = tx.objectStore('history-heads'), days = tx.objectStore('history-days');
+        const head = heads.get(key), legacy = tx.objectStore('snapshots').get(key);
+        const result = {parts: {}, header: null, days: [], missingDays: [], partDays: {}};
+        let stale = false;
+        head.onsuccess = () => {
+          if (writing) {
+            const current = head.result || {days: []};
+            // 古い通信が後から完了しても、新しく確定した日のデータを巻き戻さない。
+            if (Date.parse(current.header?.exported_at) > Date.parse(value.header?.exported_at)) { stale = true; return; }
+            for (const [day, parts] of Object.entries(value.updates)) days.put({parts}, key + '|' + day);
+            heads.put({header: value.header, days: [...new Set([...current.days, ...Object.keys(value.updates)])].sort()}, key);
+          } else if (head.result) {
+            result.header = head.result.header; result.days = head.result.days;
+            for (const day of head.result.days) {
+              const part = days.get(key + '|' + day);
+              part.onsuccess = () => {
+                if (!part.result) { result.missingDays.push(day); return; }
+                Object.assign(result.parts, part.result.parts || {});
+                for (const hash of Object.keys(part.result.parts || {})) result.partDays[hash] = day;
+              };
+            }
+          }
+        };
+        legacy.onsuccess = () => { if (!head.result) Object.assign(result.parts, legacy.result?.parts || {}); };
+        tx.oncomplete = () => { db.close(); resolve(writing ? {stale} : result); };
         tx.onabort = tx.onerror = () => { db.close(); reject(tx.error); };
       };
     });
   }
-  return {get: key => run(key), set: (key, value) => run(key, value, true)};
+  return {get: key => run(key), commit: (key, value) => run(key, value, true)};
+}
+function vpEndpointKey(url, site) { const endpoint = new URL(url); endpoint.search = ''; endpoint.hash = ''; return endpoint.href + '|' + site; }
+function vpCachedDays(cached) {
+  const days = new Map();
+  for (const [hash, text] of Object.entries(cached?.parts || {})) {
+    let rows;
+    try { rows = JSON.parse(text); } catch { continue; }
+    const day = rows?.[0]?.day;
+    if (!Array.isArray(rows) || typeof day !== 'string' || rows.some(r => r?.day !== day)) continue;
+    if (!days.has(day)) days.set(day, {}); days.get(day)[hash] = text;
+  }
+  return days;
+}
+async function vpStoreHistory(cache, key, cached, updates, header) {
+  if (cache.commit) {
+    // v1キャッシュの全日を最初のトランザクションに含め、移行漏れを防ぐ。
+    const migration = cached?.header ? {} : Object.fromEntries(vpCachedDays(cached));
+    const result = await cache.commit(key, {updates: {...migration, ...updates}, header});
+    if (result?.stale) throw new Error('ほかの更新で新しい履歴が保存されています。もう一度読み込んでください。');
+  } else {
+    const days = vpCachedDays(cached);
+    for (const [day, parts] of Object.entries(updates)) days.set(day, parts);
+    await cache.set(key, {header, parts: Object.assign({}, ...days.values())});
+  }
+}
+// 既存の自分用ページに保存済みの全期間データを、接続先ごとの履歴へ引き継ぐ。
+async function rememberViewerHistory(url, site, doc, cache = vpCache(), replaceDays = false) {
+  if (!doc || !Array.isArray(doc.records)) return;
+  const key = vpEndpointKey(url, site), cached = await cache.get(key), days = vpCachedDays(cached), updates = {};
+  for (const row of doc.records) {
+    if (typeof row?.day !== 'string') continue;
+    if (!updates[row.day]) updates[row.day] = [];
+    updates[row.day].push(row);
+  }
+  for (const [day, rows] of Object.entries(updates)) {
+    if (!replaceDays && days.has(day)) { delete updates[day]; continue; } // 移行時にGoogleで確定済みの日は変更しない。
+    const text = JSON.stringify(rows), hash = await vpClientHash(text); updates[day] = {[hash]: text};
+  }
+  if (!Object.keys(updates).length && cached?.header) return;
+  const {records, ...header} = doc;
+  await vpStoreHistory(cache, key, cached, updates, replaceDays ? header : cached?.header || header);
 }
 async function vpClientHash(text) {
   const data = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(data)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function readViewerHistory(url, site, cache = vpCache()) {
+  const cached = await cache.get(vpEndpointKey(url, site));
+  if (!cached?.header) return null;
+  if (cached.missingDays?.length) throw new Error('保存した履歴の一部がありません。オンラインで最新を読み込んでください。');
+  const records = [];
+  for (const [hash, text] of Object.entries(cached.parts)) {
+    if (await vpClientHash(text) !== hash) throw new Error('保存した履歴が破損しています。オンラインで最新を読み込んでください。');
+    records.push(...JSON.parse(text));
+  }
+  return {...cached.header, history: true, history_days: cached.days || [...vpCachedDays(cached).keys()], records};
 }
 async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache()) {
   const m = vpValidManifest(manifest, site), endpoint = new URL(url);
   endpoint.search = ''; endpoint.hash = '';
   const key = endpoint.href + '|' + site;
   let cached = null;
-  try { cached = await cache.get(key); } catch { /* 保存を使えなくても読める */ }
+  try { cached = await cache.get(key); }
+  catch { throw new Error('履歴を端末から読み出せませんでした。保存データは変更していません。'); }
   const parts = new Map(), missing = [];
   for (const p of m.parts) {
     const text = cached?.parts?.[p.hash];
@@ -94,8 +182,44 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       vpRows(item.text, p); parts.set(p.hash, item.text);
     }
   }
-  const doc = {...m.header, records: m.parts.flatMap(p => vpRows(parts.get(p.hash), p))};
-  try { await cache.set(key, {parts: Object.fromEntries(parts)}); } catch { /* 容量不足なら次回全件取得 */ }
+  const covered = m.version === 2 ? m.days : [...new Set(m.parts.map(p => p.day))];
+  if (cached?.missingDays?.some(day => !covered.includes(day))) {
+    throw new Error('Googleにない過去の履歴が端末で欠損しています。元バックアップから復元してください。保存データは変更していません。');
+  }
+  // 現行一覧にある壊れたパーツは取得済みの正しい内容へ置換してから検査する。
+  const restored = {...(cached?.parts || {})};
+  for (const [hash, text] of parts) restored[hash] = text;
+  for (const [hash, text] of Object.entries(restored)) {
+    if (await vpClientHash(text) === hash) continue;
+    if (covered.includes(cached?.partDays?.[hash])) { delete restored[hash]; continue; }
+    let day;
+    try { day = JSON.parse(text)?.[0]?.day; } catch { /* 日付不明は自動で破棄しない */ }
+    if (day && covered.includes(day)) { delete restored[hash]; continue; }
+    throw new Error('保存した過去の履歴が破損しています。元バックアップから復元してください。保存データは変更していません。');
+  }
+  const history = vpCachedDays({parts: restored}), updates = {};
+  // v1の対象範囲内で消えた日も完成版として空にする。期間外の古い日は残す。
+  if (m.version === 1 && covered.length) {
+    const sorted = covered.slice().sort();
+    for (const day of history.keys()) if (day >= sorted[0] && day <= sorted.at(-1) && !covered.includes(day)) covered.push(day);
+  }
+  for (const day of covered) updates[day] = {};
+  for (const p of m.parts) updates[p.day][p.hash] = parts.get(p.hash);
+  for (const [day, value] of Object.entries(updates)) history.set(day, value);
+  for (const [day, value] of history) {
+    if (Object.hasOwn(updates, day)) continue;
+    for (const [hash, text] of Object.entries(value)) if (await vpClientHash(text) !== hash) {
+      throw new Error('保存した過去の履歴が破損しています。元バックアップから復元してください。保存データは変更していません。');
+    }
+  }
+  // 日別に保存した過去分も既存画面へ渡す。画面・採点規則は変えない。
+  const doc = {...m.header, history: true, history_days: [...history.keys()].sort(), records: [...history].sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([, texts]) => Object.values(texts).flatMap(text => JSON.parse(text)))};
+  const previousDays = vpCachedDays(cached);
+  const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
+    cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));
+  try { await vpStoreHistory(cache, key, cached, changed, m.header); }
+  catch (e) { throw new Error('履歴を端末に保存できませんでした。前の保存データは保持しています。空き容量とブラウザの保存設定を確認してください。'); }
   return doc;
 }
 async function fetchViewerDocument(url, site, getJson, cache) {
@@ -111,4 +235,4 @@ async function fetchViewerDocument(url, site, getJson, cache) {
   }
 }
 
-export {fetchViewerParts, fetchViewerDocument};
+export {fetchViewerParts, fetchViewerDocument, rememberViewerHistory, readViewerHistory};
