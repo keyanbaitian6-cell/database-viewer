@@ -49,6 +49,43 @@ function vpRows(text, part) {
 
 // v1のsnapshotsを保持したまま、日別の履歴へ移行する。取得・検査が完了してから確定する。
 function vpCache() {
+  // Reopening a long history must not retain every JSON string alongside the
+  // decoded records. Read one day per transaction; never hold a transaction
+  // open while awaiting crypto or rendering work.
+  async function* stream(key) {
+    if (!globalThis.indexedDB) return;
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('database-viewer-parts-v1', 2);
+      request.onupgradeneeded = () => {
+        for (const name of ['snapshots', 'history-heads', 'history-days']) {
+          if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name);
+        }
+      };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('cache blocked'));
+      request.onsuccess = () => resolve(request.result);
+    });
+    const read = (store, id) => new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly'), request = tx.objectStore(store).get(id);
+      tx.oncomplete = () => resolve(request.result);
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+    try {
+      const head = await read('history-heads', key);
+      if (!head) return;
+      yield {header: head.header, days: head.days};
+      for (const day of head.days) {
+        // Verify the head did not change during a concurrent tab's commit.
+        // The final check also detects a writer that replaced an earlier day.
+        const value = await read('history-days', key + '|' + day);
+        if (!value) throw new Error('保存した履歴の一部がありません。オンラインで最新を読み込んでください。');
+        if (!value.parts || typeof value.parts !== 'object' || Array.isArray(value.parts)) throw new Error('保存した履歴が破損しています。');
+        yield {day, parts: value.parts};
+      }
+      const latest = await read('history-heads', key);
+      if (vpCanonical(latest) !== vpCanonical(head)) throw new Error('履歴が更新されました。もう一度読み込んでください。');
+    } finally { db.close(); }
+  }
   async function run(key, value, writing) {
     if (!globalThis.indexedDB) {
       if (writing) throw new Error('端末の保存領域を利用できません。');
@@ -66,7 +103,7 @@ function vpCache() {
       request.onsuccess = () => {
         const db = request.result, tx = db.transaction(['snapshots', 'history-heads', 'history-days'], writing ? 'readwrite' : 'readonly');
         const heads = tx.objectStore('history-heads'), days = tx.objectStore('history-days');
-        const head = heads.get(key), legacy = tx.objectStore('snapshots').get(key);
+        const head = heads.get(key);
         const result = {parts: {}, header: null, days: [], missingDays: [], partDays: {}};
         let stale = false;
         head.onsuccess = () => {
@@ -75,7 +112,7 @@ function vpCache() {
             // 古い通信が後から完了しても、新しく確定した日のデータを巻き戻さない。
             if (Date.parse(current.header?.exported_at) > Date.parse(value.header?.exported_at)) { stale = true; return; }
             for (const [day, parts] of Object.entries(value.updates)) days.put({parts}, key + '|' + day);
-            heads.put({header: value.header, days: [...new Set([...current.days, ...Object.keys(value.updates)])].sort()}, key);
+            heads.put({header: value.header, days: [...new Set([...current.days, ...Object.keys(value.updates)])].sort(), revision: (current.revision || 0) + 1}, key);
           } else if (head.result) {
             result.header = head.result.header; result.days = head.result.days;
             for (const day of head.result.days) {
@@ -86,20 +123,27 @@ function vpCache() {
                 for (const hash of Object.keys(part.result.parts || {})) result.partDays[hash] = day;
               };
             }
+          } else {
+            const legacy = tx.objectStore('snapshots').get(key);
+            legacy.onsuccess = () => Object.assign(result.parts, legacy.result?.parts || {});
           }
         };
-        legacy.onsuccess = () => { if (!head.result) Object.assign(result.parts, legacy.result?.parts || {}); };
         tx.oncomplete = () => { db.close(); resolve(writing ? {stale} : result); };
         tx.onabort = tx.onerror = () => { db.close(); reject(tx.error); };
       };
     });
   }
-  return {get: key => run(key), commit: (key, value) => run(key, value, true)};
+  return {get: key => run(key), commit: (key, value) => run(key, value, true), stream};
 }
 function vpEndpointKey(url, site) { const endpoint = new URL(url); endpoint.search = ''; endpoint.hash = ''; return endpoint.href + '|' + site; }
 function vpCachedDays(cached) {
   const days = new Map();
   for (const [hash, text] of Object.entries(cached?.parts || {})) {
+    const indexedDay = cached?.partDays?.[hash];
+    if (typeof indexedDay === 'string') {
+      if (!days.has(indexedDay)) days.set(indexedDay, {});
+      days.get(indexedDay)[hash] = text; continue;
+    }
     let rows;
     try { rows = JSON.parse(text); } catch { continue; }
     const day = rows?.[0]?.day;
@@ -142,6 +186,20 @@ async function vpClientHash(text) {
   return [...new Uint8Array(data)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 async function readViewerHistory(url, site, cache = vpCache()) {
+  if (cache.stream) {
+    let header = null, days = [], records = [];
+    for await (const value of cache.stream(vpEndpointKey(url, site))) {
+      if (value.header) { header = value.header; days = value.days; continue; }
+      for (const [hash, text] of Object.entries(value.parts || {})) {
+        if (await vpClientHash(text) !== hash) throw new Error('保存した履歴が破損しています。オンラインで最新を読み込んでください。');
+        const rows = JSON.parse(text);
+        if (!Array.isArray(rows) || rows.some(r => r?.day !== value.day)) throw new Error('保存した履歴の日付が一致しません。');
+        for (const row of rows) records.push(row);
+      }
+    }
+    if (!header) return null;
+    return {...header, history: true, history_days: days, records};
+  }
   const cached = await cache.get(vpEndpointKey(url, site));
   if (!cached?.header) return null;
   if (cached.missingDays?.length) throw new Error('保存した履歴の一部がありません。オンラインで最新を読み込んでください。');
@@ -197,7 +255,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
     if (day && covered.includes(day)) { delete restored[hash]; continue; }
     throw new Error('保存した過去の履歴が破損しています。元バックアップから復元してください。保存データは変更していません。');
   }
-  const history = vpCachedDays({parts: restored}), updates = {};
+  const history = vpCachedDays({parts: restored, partDays: cached?.partDays}), updates = {};
   // v1の対象範囲内で消えた日も完成版として空にする。期間外の古い日は残す。
   if (m.version === 1 && covered.length) {
     const sorted = covered.slice().sort();
@@ -214,7 +272,11 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   }
   // 日別に保存した過去分も既存画面へ渡す。画面・採点規則は変えない。
   const doc = {...m.header, history: true, history_days: [...history.keys()].sort(), records: [...history].sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([, texts]) => Object.values(texts).flatMap(text => JSON.parse(text)))};
+    .flatMap(([day, texts]) => Object.values(texts).flatMap(text => {
+      const rows = JSON.parse(text);
+      if (!Array.isArray(rows) || rows.some(r => r?.day !== day)) throw new Error('保存した履歴の日付が一致しません。');
+      return rows;
+    }))};
   const previousDays = vpCachedDays(cached);
   const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
     cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));

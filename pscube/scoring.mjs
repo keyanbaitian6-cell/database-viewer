@@ -69,7 +69,7 @@ export function comparisonPool(row, data) {
   const first = dayShift(row.day, -30), target = Math.max(500, row.games);
   const lowest = Math.max(500, target / 2), highest = target * 2;
   return machineHistory(data, row).filter(r => r.day >= first && r.day < row.day &&
-    r.games >= lowest && r.games <= highest && !implausible(r));
+    r.games >= lowest && r.games <= highest && !implausible(r) && r.source_site !== 'anaslo');
 }
 
 function adjustedRank(value, refs, field, maximum, games) {
@@ -94,6 +94,7 @@ export function graphMetrics(graph) {
 export function scoreRecord(row, data) {
   const machine = machineInfo(data, row), profile = profileOf(machine), weights = PROFILES[profile];
   const base = { profile, weights, parts: null, total: null, provisional: true, coverage: 0, reasons: [] };
+  if (row.source_site === 'anaslo') return { ...base, reasons: ['アナスロ補完履歴：MY・信号の対応未確認のため採点対象外'] };
   if (row.games <= 0) return { ...base, reasons: ['未稼働・回転数なし'] };
   if (implausible(row)) return { ...base, reasons: ['サイトの数値が異常なため採点なし（88888888などの表示）'] };
   if (row.games <= MIN_SCORED_GAMES) return { ...base, reasons: [`${MIN_SCORED_GAMES}G以下のため採点なし`] };
@@ -143,7 +144,7 @@ export function nextDayEvidence(record, data) {
   const profile = profileOf(machineInfo(data, record)), metric = dayMetric(profile);
   const first = dayShift(record.day, -30), byDay = new Map();
   for (const r of machineHistory(data, record)) {
-    if (r.day >= first && r.day <= record.day && r.games >= MIN_SCORED_GAMES && !implausible(r)) {
+    if (r.day >= first && r.day <= record.day && r.games >= MIN_SCORED_GAMES && !implausible(r) && r.source_site !== 'anaslo') {
       if (!byDay.has(r.day)) byDay.set(r.day, []);
       byDay.get(r.day).push(r);
     }

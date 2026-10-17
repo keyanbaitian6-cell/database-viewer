@@ -331,26 +331,41 @@ function dateEventNames(events = []) {
   return [...latest].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja')).map(([name]) => name);
 }
 
+function validateAnasloRecord(r) {
+  let url; try { url = new URL(r.source_url); } catch { fail('アナスロ履歴の出典が不正です。'); }
+  if (url.origin !== 'https://ana-slo.com' || url.username || url.password || !url.pathname.startsWith(`/${r.day}-`) ||
+      !/^[0-9a-f]{64}$/.test(r.source_sha256) || typeof r.source_machine !== 'string' || !r.source_machine.trim() ||
+      ['my', 'detail_url', 'observed_at', 'graph', 'net_medals'].some(k => !Object.hasOwn(r, k) || r[k] !== null)) fail('アナスロ履歴の出典または欠損値が不正です。');
+}
+
 function validateData(raw) {
-  if (raw?.format !== FORMAT || raw.version !== 1 || !Array.isArray(raw.machines) || !Array.isArray(raw.records) || raw.records.length > 100000 || raw.machines.length > 10000) fail('P’s CUBEの保存ファイルではありません。');
+  if (raw?.format !== FORMAT || raw.version !== 1 || !Array.isArray(raw.machines) || !Array.isArray(raw.records) || (raw.history !== true && raw.records.length > 100000) || raw.machines.length > 10000) fail('P’s CUBEの保存ファイルではありません。');
+  if (raw.history === true) {
+    const days = new Map();
+    for (const r of raw.records) { const n = (days.get(r?.day) || 0) + 1; if (n > 100000) fail('1日分の記録が多すぎます。'); days.set(r?.day, n); }
+  }
   const basic = r => {
     if (!r || !/^c\d+$/.test(r.store) || typeof r.rate !== 'string' || !/^\d+(?:\.\d+)?$/.test(r.rate) ||
         typeof r.machine !== 'string' || !r.machine.trim() || r.machine.length > 200) fail('店舗・貸玉・機種名が不正です。');
     return { store: r.store, rate: r.rate, machine: r.machine.trim() };
   };
   const machines = raw.machines.map(m => {
-    const base = basic(m), url = sameStore(m.url, base.store);
-    if (!url.pathname.endsWith('nc-v05-011.php') || url.searchParams.get('bai') !== base.rate ||
-        (url.searchParams.has('cd_ps') && url.searchParams.get('cd_ps') !== '2') ||
+    const base = basic(m), external = m.source_site === 'anaslo' && m.url == null;
+    const url = external ? null : sameStore(m.url, base.store);
+    if ((!external && (!url.pathname.endsWith('nc-v05-011.php') || url.searchParams.get('bai') !== base.rate ||
+        (url.searchParams.has('cd_ps') && url.searchParams.get('cd_ps') !== '2'))) ||
         (m.expected_count !== null && (!integer(m.expected_count) || m.expected_count < 1 || m.expected_count > 5000))) fail('機種情報が不正です。');
     if (m.machine_type != null && !['normal', 'other'].includes(m.machine_type)) fail('機種タイプが不正です。');
-    return { ...base, url: url.href, expected_count: m.expected_count, machine_type: m.machine_type ?? null };
+    return { ...base, url: url?.href ?? null, expected_count: m.expected_count, machine_type: m.machine_type ?? null,
+      ...(external ? {source_site: 'anaslo'} : {}) };
   });
   const records = raw.records.map(r => {
-    const base = basic(r), url = sameStore(r.detail_url, base.store);
-    if (!integer(r.rack) || r.rack < 1 || !validDay(r.day) || !url.pathname.endsWith('nc-v06-001.php') ||
-        url.searchParams.get('cd_dai') !== String(r.rack) || url.hash !== `#${r.day.replaceAll('-', '')}`) fail('台番号・営業日・リンクが一致しません。');
-    for (const k of ['bb', 'rb', 'at_art', 'games', 'my']) if (!integer(r[k])) fail('台の数値が不正です。');
+    const base = basic(r), external = r.source_site === 'anaslo';
+    const url = external ? null : sameStore(r.detail_url, base.store);
+    if (!integer(r.rack) || r.rack < 1 || !validDay(r.day) || (!external && (!url.pathname.endsWith('nc-v06-001.php') ||
+        url.searchParams.get('cd_dai') !== String(r.rack) || url.hash !== `#${r.day.replaceAll('-', '')}`))) fail('台番号・営業日・リンクが一致しません。');
+    if (external) validateAnasloRecord(r);
+    for (const k of external ? ['bb', 'rb', 'at_art', 'games'] : ['bb', 'rb', 'at_art', 'games', 'my']) if (!integer(r[k])) fail('台の数値が不正です。');
     if (r.net_medals != null && (!Number.isSafeInteger(r.net_medals) || Math.abs(r.net_medals) > 1000000)) fail('差枚の数値が不正です。');
     let graph = null;
     if (r.graph != null) {
@@ -361,14 +376,19 @@ function validateData(raw) {
     }
     if (r.observed_at != null && (typeof r.observed_at !== 'string' || !Number.isFinite(Date.parse(r.observed_at)))) fail('更新時刻が不正です。');
     return { ...base, rack: r.rack, day: r.day, bb: r.bb, rb: r.rb, at_art: r.at_art, games: r.games, my: r.my,
-      detail_url: url.href, observed_at: r.observed_at ?? null, graph,
-      ...(r.net_medals == null ? {} : {net_medals: r.net_medals}) };
+      detail_url: url?.href ?? null, observed_at: r.observed_at ?? null, graph,
+      ...(external ? {source_site:'anaslo', source_url:r.source_url, source_sha256:r.source_sha256,
+        source_machine:r.source_machine, source_probabilities:r.source_probabilities, source_graph:r.source_graph} : {}),
+      ...(external ? {net_medals:null} : r.net_medals == null ? {} : {net_medals: r.net_medals}) };
   });
   if (new Set(machines.map(machineKey)).size !== machines.length || new Set(records.map(recordKey)).size !== records.length) fail('同じ機種・台が重複しています。');
   const known = new Set(machines.map(machineKey));
   if (records.some(r => !known.has(machineKey(r)))) fail('台に対応する機種情報がありません。');
   const dateEvents = validateDateEvents(raw.date_events, raw.suffix_events);
-  return { format: FORMAT, version: 1, machines, records,
+  if (raw.history_days != null && (!Array.isArray(raw.history_days) || !raw.history_days.every(validDay) ||
+      new Set(raw.history_days).size !== raw.history_days.length)) fail('履歴の日付一覧が不正です。');
+  return { format: FORMAT, version: 1, machines, records, ...(raw.history === true ? {history: true} : {}),
+    ...(raw.history_days ? {history_days: raw.history_days} : {}),
     ...(dateEvents.length ? {date_events:dateEvents} : {}) };
 }
 
@@ -377,13 +397,20 @@ function mergeData(stored, incoming) {
   const machines = new Map(old.machines.map(m => [machineKey(m), m]));
   for (const m of fresh.machines) {
     const previous = machines.get(machineKey(m));
+    if (previous && m.source_site === 'anaslo') continue;
     machines.set(machineKey(m), { ...m, expected_count: m.expected_count ?? previous?.expected_count ?? null,
       machine_type: m.machine_type ?? previous?.machine_type ?? null });
   }
-  const records = new Map(old.records.map(r => [recordKey(r), r]));
+  const completeDays = new Set(fresh.history_days || []), freshKeys = new Set(fresh.records.map(recordKey));
+  const records = new Map(old.records.filter(r => !completeDays.has(r.day) || freshKeys.has(recordKey(r))).map(r => [recordKey(r), r]));
+  const rackDayKey = r => JSON.stringify([r.store, r.rate, r.rack, r.day]);
+  const occupied = new Set([...records.values()].map(rackDayKey));
   for (const r of fresh.records) {
     const key = recordKey(r), previous = records.get(key);
+    if (r.source_site === 'anaslo' && occupied.has(rackDayKey(r))) continue;
+    occupied.add(rackDayKey(r));
     if (!previous) { records.set(key, r); continue; }
+    if (previous.source_site === 'anaslo' && r.source_site !== 'anaslo') { records.set(key, r); continue; }
     const sameNumbers = ['bb', 'rb', 'at_art', 'games', 'my'].every(k => previous[k] === r[k]);
     const oldTime = Date.parse(previous.observed_at), newTime = Date.parse(r.observed_at);
     const older = Number.isFinite(oldTime) && Number.isFinite(newTime)
@@ -402,7 +429,8 @@ function mergeData(stored, incoming) {
   }
   // Events are independent of machine/rack data. A removal is retained as a dated
   // null name so an older backup cannot bring the event back.
-  return validateData({ ...emptyData(), machines: [...machines.values()], records: [...records.values()],
+  return validateData({ ...emptyData(), ...(old.history || fresh.history ? {history: true} : {}), machines: [...machines.values()], records: [...records.values()],
+    ...(old.history_days || fresh.history_days ? {history_days: [...new Set([...(old.history_days || []), ...(fresh.history_days || [])])]} : {}),
     date_events:mergeDateEvents(old.date_events, fresh.date_events) });
 }
 
