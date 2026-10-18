@@ -109,8 +109,10 @@ function vpCache() {
         head.onsuccess = () => {
           if (writing) {
             const current = head.result || {days: []};
-            // 古い通信が後から完了しても、新しく確定した日のデータを巻き戻さない。
-            if (Date.parse(current.header?.exported_at) > Date.parse(value.header?.exported_at)) { stale = true; return; }
+            // 古い通信が後から完了しても、新しく確定した日のデータを巻き戻さない。比べるのはGoogleの日別一覧どうしの時刻
+            // （parts_at）だけ。閲覧用ファイル全体を読んだときの時刻（PCの書き出し）は一覧と別の時計なので比べない
+            // （2026-10-18：全体を読んだ後、一覧の時刻が古いまま進まず、P-STATIONの保存を毎回断っていた）。
+            if (value.header?.parts_at && Date.parse(current.header?.parts_at) > Date.parse(value.header.parts_at)) { stale = true; return; }
             for (const [day, parts] of Object.entries(value.updates)) days.put({parts}, key + '|' + day);
             heads.put({header: value.header, days: [...new Set([...current.days, ...Object.keys(value.updates)])].sort(), revision: (current.revision || 0) + 1}, key);
           } else if (head.result) {
@@ -280,7 +282,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   const previousDays = vpCachedDays(cached);
   const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
     cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));
-  try { await vpStoreHistory(cache, key, cached, changed, m.header); }
+  try { await vpStoreHistory(cache, key, cached, changed, {...m.header, parts_at: m.header.exported_at}); }
   catch (e) { throw new Error('履歴を端末に保存できませんでした。前の保存データは保持しています。空き容量とブラウザの保存設定を確認してください。'); }
   return doc;
 }
