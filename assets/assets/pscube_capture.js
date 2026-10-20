@@ -92,6 +92,18 @@ function siteUrl(raw, base) {
   return u;
 }
 function storeOf(url) { return url.pathname.match(/\/(c\d+)\//)[1]; }
+/** 全台一覧に並ぶ日付タブ（YYYY-MM-DD、古い順）。読めなければ空。保存の判定には使わず、取り込み日の
+ * タブが無い機種（入れ替えで入った新台など）を見分けるためだけに返す。新台はその日からのタブしか無く、
+ * 前日を指定して開くとサイトは最新のタブを選ぶ（2026-10-19 利用者が実サイトで確認）。 */
+function tableDays(root) {
+  try {
+    const days = [...root.querySelectorAll('[data-ymd]')].map(n => n.getAttribute('data-ymd'))
+      .filter(v => /^\d{8}$/.test(v || '')).map(v => `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6)}`).filter(validDay);
+    return [...new Set(days)].sort();
+  } catch {
+    return [];
+  }
+}
 function sameStore(raw, store) {
   const u = siteUrl(raw);
   if (storeOf(u) !== store) fail('店舗が異なるリンクが含まれています。');
@@ -136,6 +148,9 @@ function extractGraph(container, kind) {
   return { kind, zero_y: zeroY, points };
 }
 
+// 全台一覧の台ごとの数値の欄。すべて空（または「-」だけ）の台は、その日の数値が無い台。
+const NUMBER_KEYS = ['toku1-count', 'toku5-count', 'toku4-count', 'sum_game', 'sadama_s'];
+const BLANK = /^[-‐－ー―\s]*$/;
 function parsePage(page) {
   const url = siteUrl(page.url), store = storeOf(url);
   // Template content is inert: images, scripts and frames are never attached to the page.
@@ -144,6 +159,7 @@ function parsePage(page) {
   const dom = template.content;
   const data = emptyData();
   const missingHistoryDays = [];
+  const missingRacks = [];
   // 台別ページの1列目（サイトの「本日」）の日付。保存する側が7日分の範囲を確かめるのに使う。
   let historyLatestDay = null;
   if (url.pathname.endsWith('nc-v03-001.php')) {
@@ -175,7 +191,18 @@ function parsePage(page) {
     for (const card of dom.querySelectorAll('li[id^="li-"]')) {
       const rack = numberText(card.id.slice(3));
       const rows = Object.fromEntries([...card.querySelectorAll('tr[data-key]')].map(row => [row.dataset.key, text(row.querySelector('td:last-child'))]));
-      const link = siteUrl(card.querySelector('a[href*="nc-v06-001.php"]')?.getAttribute('href') || '', url);
+      // リンクが無いときに空の値から全台一覧の住所を作らない（台別ページの住所として保存の検査で
+      // 「対象のP’s CUBEページではありません」になり、理由が分からなかった。2026-10-19）。
+      const href = card.querySelector('a[href*="nc-v06-001.php"]')?.getAttribute('href');
+      // 過去の日の全台一覧にも今の台が並ぶ（前の日の台数は出ない、2026-10-19 利用者）。増台した台はその日の数値も
+      // 台別ページへのリンクも無いことがあるので、リンクも数値もすべて空の台だけ「その日は無かった台」として返す。
+      // 0で埋めない。保存してよいか（過去の日か・台数が合うか）はPC・Androidの保存側が決める。
+      if (!href && NUMBER_KEYS.every(key => BLANK.test(rows[key] ?? ''))) {
+        missingRacks.push(rack);
+        continue;
+      }
+      if (!href) fail(`${rack}番台の台別ページへのリンクがありません。数値が表示されてから保存してください。`);
+      const link = siteUrl(href, url);
       data.records.push({ store, rate, machine, rack, day, observed_at,
         bb: numberText(rows['toku1-count']), rb: numberText(rows['toku5-count']),
         at_art: numberText(rows['toku4-count']), games: numberText(rows.sum_game), my: numberText(rows.sadama_s),
@@ -226,6 +253,7 @@ function parsePage(page) {
   }
   if (!data.records.length) fail('台の数値がありません。読み込み完了後に保存してください。');
   return {...validateData(data),
+    ...(missingRacks.length ? {missing_racks: missingRacks} : {}),
     ...(missingHistoryDays.length ? {missing_history_days: missingHistoryDays} : {}),
     ...(historyLatestDay ? {history_latest_day: historyLatestDay} : {})};
 }
@@ -448,8 +476,8 @@ function progress(data, machine, day) {
 
 try {
   const result = await capturePageWithNet({url: location.href, html: document.documentElement.outerHTML});
-  return JSON.stringify({...result, source_url: location.href});
+  return JSON.stringify({...result, source_url: location.href, available_days: tableDays(document)});
 } catch (error) {
-  return JSON.stringify({error: String(error?.message ?? error)});
+  return JSON.stringify({error: String(error?.message ?? error), source_url: location.href, available_days: tableDays(document)});
 }
 })()
