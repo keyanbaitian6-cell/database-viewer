@@ -21,7 +21,8 @@
 
   <title>database 閲覧</title>
   <link rel="manifest" href="manifest.json?v=panda-20260930">
-  <style>body { background: #f5f5f7; margin: 0; }</style>
+  <!-- ダブルタップでの拡大を止める（ボタンを連打すると拡大されるため、2026-10-22 利用者）。2本指で広げる拡大はそのまま。 -->
+  <style>body { background: #f5f5f7; margin: 0; } html, body { touch-action: manipulation; }</style>
 </head>
 <body>
   <script>
