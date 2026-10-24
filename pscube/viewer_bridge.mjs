@@ -4,6 +4,7 @@ import {applyGraphProbe} from './graph_probe.mjs';
 import {REMOTE_KEY, fetchDrive, buildBackup, backupFileName} from './sync.mjs';
 import {fetchShared, postShared} from '../shared_events.mjs';
 import {rememberViewerHistory} from '../viewer_parts.mjs';
+import {readBackupJson} from '../backup_stream.mjs';
 
 // Reuse the old database and keys so the already imported records survive.
 const open = () => new Promise((resolve, reject) => {
@@ -23,14 +24,16 @@ async function read() {
     });
   } finally { db.close(); }
 }
-async function write(data, meta) {
+async function write(data, meta, mergeMeta = false) {
   const db = await open();
   try {
     await new Promise((resolve, reject) => {
       const tx = db.transaction('state', 'readwrite');
       const state = tx.objectStore('state'), current = state.get('data');
+      const previousMeta = mergeMeta ? state.get('meta') : null;
       let failure;
-      current.onsuccess = () => {
+      const commit = () => {
+        if (current.readyState !== 'done' || (previousMeta && previousMeta.readyState !== 'done')) return;
         try {
           // Another tab or Drive refresh may have saved a graph after read().
           // Merge against the latest value inside this transaction, while
@@ -39,9 +42,11 @@ async function write(data, meta) {
           const types = new Map(data.machines.map(m => [machineKey(m), m.machine_type]));
           state.put(validateData({...latest, machines:latest.machines.map(m =>
             types.has(machineKey(m)) ? {...m, machine_type:types.get(machineKey(m))} : m)}), 'data');
-          state.put(meta, 'meta');
+          state.put(mergeMeta ? {...previousMeta.result, ...meta} : meta, 'meta');
         } catch (e) { failure = e; tx.abort(); }
       };
+      current.onsuccess = commit;
+      if (previousMeta) previousMeta.onsuccess = commit;
       tx.oncomplete = resolve;
       tx.onerror = tx.onabort = () => reject(failure || tx.error || new Error('端末に保存できませんでした。'));
     });
@@ -69,7 +74,7 @@ export async function readPscubeFiles(files, existing) {
     if (/\.webarchive$/i.test(file.name) || !head.startsWith('{')) {
       fresh = parsePage(await readWebArchive(await file.arrayBuffer()));
     } else {
-      const raw = JSON.parse((await file.text()).replace(/^\uFEFF/, ''));
+      const raw = (await readBackupJson(file.stream())).document;
       if (raw?.graph && raw?.rack) {
         data = applyGraphProbe(data, raw);
         continue;
@@ -155,6 +160,7 @@ async function mergeShared(text) {
 
 export function createPscubeBridge() {
   return {
+    pickedEvents() { return null; },
     setDateEvent,
     setDateEventDays,
     // 共有カレンダー（P’s CUBEのページは、この橋渡しをそのまま databaseViewer に使う）。
@@ -203,10 +209,10 @@ export function createPscubeBridge() {
       try { if (url) localStorage.setItem(REMOTE_KEY, url); else localStorage.removeItem(REMOTE_KEY); } catch {}
     },
     async save(text) {
-      const raw = JSON.parse(text), valid = validateData(raw), previous = await read();
-      await write(previous.data ? mergeData(validateData(previous.data), valid) : valid,
-        {...previous.meta, exported_at: raw.header?.exported_at ?? null,
-          file: raw.file ?? 'P’s CUBE', loaded_at: raw.loaded_at ?? new Date().toISOString()});
+      // 旧データは書き込みトランザクション内で1回だけ読み、最新の内容と統合する。
+      const raw = JSON.parse(text), valid = validateData(raw);
+      await write(valid, {exported_at: raw.header?.exported_at ?? null,
+        file: raw.file ?? 'P’s CUBE', loaded_at: raw.loaded_at ?? new Date().toISOString()}, true);
     },
     async load() {
       const saved = await read();

@@ -55,142 +55,24 @@
     // [known] は表示中の内容の書き出し時刻。先頭の行の exported_at が同じなら、
     // 中身も同じなので、そこで読むのをやめて { unchanged: true } を返す。
     async function parse(stream, known) {
-      const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
-      let unchanged = false;
-      const records = [];
-      const candidates = [];
-      let header = null;
-      let section = 'header';
-      let buffer = '';
-      let whole = null; // 1行に1台の形でないとき、全文をためる
-      let streamedCandidates = false;
-      // 画像を保持せず外枠のJSONも検査する。各台の値だけをnullへ置き換える。
-      const structure = [];
-      const recordsStart = /"records"\s*:\s*\[$/;
-
-      // P’s CUBEのファイル（pscube-viewer）は別のページで読む。ここで読むと何も入らないので案内する。
       const notBackup = (format) => new Error(format === 'pscube-viewer'
         ? 'P’s CUBEのファイルです。P’s CUBEのページ（https://keyanbaitian6-cell.github.io/database-viewer/pscube/）の「ファイルを読み込む」で読み込んでください。'
         : 'databaseのバックアップファイルではありません。');
-
-      const validate = (doc) => {
+      const validate = doc => {
         if (doc && typeof doc.error === 'string') throw new Error(doc.error);
-        if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) {
-          throw notBackup(doc && doc.format);
-        }
-        if (doc.version !== 1) {
-          throw new Error('対応していないバックアップのバージョンです。');
-        }
-        for (const key of ['candidate_snapshots', 'date_events']) {
-          if (key in doc && !Array.isArray(doc[key])) {
-            throw new Error(key + ' の形式が不正です。');
-          }
+        if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) throw notBackup(doc?.format);
+        if (doc.version !== 1) throw new Error('対応していないバックアップのバージョンです。');
+        for (const name of ['candidate_snapshots', 'date_events']) {
+          if (name in doc && !Array.isArray(doc[name])) throw new Error(name + ' の形式が不正です。');
         }
       };
-
-      const handle = (raw) => {
-        const text = raw.trim();
-        if (!text) return;
-        if (section === 'header') {
-          const match = recordsStart.exec(text);
-          if (!text.startsWith('{') || !match) {
-            whole = [raw];
-            section = 'whole';
-            return;
-          }
-          let head = text.slice(0, match.index).trimEnd();
-          if (head.endsWith(',')) head = head.slice(0, -1);
-          header = JSON.parse(head + '}');
-          validate({ ...header, records: [] });
-          if (known && header.exported_at === known) {
-            unchanged = true;
-            return;
-          }
-          structure.push(text);
-          section = 'records';
-          return;
-        }
-        if (section === 'done') {
-          structure.push(text);
-          return;
-        }
-        if (text.startsWith(']')) {
-          structure.push(text);
-          section = section === 'records' && text.includes('"candidate_snapshots"') &&
-              text.endsWith('[') ? 'candidates' : 'done';
-          if (section === 'candidates') streamedCandidates = true;
-          return;
-        }
-        const item = JSON.parse(text.endsWith(',') ? text.slice(0, -1) : text);
-        structure.push(text.endsWith(',') ? 'null,' : 'null');
-        if (section === 'records') records.push(lighten(item));
-        else candidates.push(item);
-      };
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (section === 'whole') { whole.push(value); continue; }
-          buffer += value;
-          let index;
-          while (section !== 'whole' && !unchanged && (index = buffer.indexOf('\n')) >= 0) {
-            handle(buffer.slice(0, index));
-            buffer = buffer.slice(index + 1);
-          }
-          if (unchanged) break;
-          if (section === 'whole') { whole.push(buffer); buffer = ''; }
-          // 見出し行が来ないまま長くなったら、1行だけの以前の形とみなす。
-          if (section === 'header' && buffer.length > 1000000) {
-            whole = [buffer]; buffer = ''; section = 'whole';
-          }
-        }
-        if (unchanged) {
-          // 残りは読まない（通信もここで止まる）。
-          try { await reader.cancel(); } catch (_) {}
-          return { unchanged: true, header };
-        }
-        // 改行で終わらない短いJSONも、全文形式へ切り替えてから処理する。
-        if (section !== 'whole') {
-          handle(buffer);
-          buffer = '';
-        }
-      } catch (error) {
-        try { await reader.cancel(); } catch (_) {}
-        throw error;
-      } finally {
-        reader.releaseLock();
-      }
-      if (section === 'whole') {
-        whole.push(buffer);
-        const doc = JSON.parse(whole.join(''));
-        validate(doc);
-        if (known && doc.exported_at === known) {
-          return { unchanged: true, header: { format: doc.format, exported_at: doc.exported_at } };
-        }
-        return {
-          header: { format: doc.format, exported_at: doc.exported_at, source: doc.source },
-          records: doc.records.map(lighten),
-          candidates: Array.isArray(doc.candidate_snapshots) ? doc.candidate_snapshots : [],
-          date_events: Array.isArray(doc.date_events) ? doc.date_events : [],
-          ...(Array.isArray(doc.history_days) ? {history_days: doc.history_days} : {}),
-        };
-      }
-      // EOFだけでは成功にしない。閉じ括弧、カンマ、余分な末尾文字も検査する。
-      const envelope = JSON.parse(structure.join('\n'));
-      validate(envelope);
-      if (envelope.records.length !== records.length || envelope.records.some(item => item !== null)) {
-        throw new Error('records が重複しているか、形式が不正です。');
-      }
-      if (streamedCandidates) {
-        if (envelope.candidate_snapshots.length !== candidates.length ||
-            envelope.candidate_snapshots.some(item => item !== null)) {
-          throw new Error('candidate_snapshots が重複しているか、形式が不正です。');
-        }
-      } else if (Array.isArray(envelope.candidate_snapshots)) {
-        for (const item of envelope.candidate_snapshots) candidates.push(item);
-      }
-      return { header, records, candidates, date_events: envelope.date_events || [] };
+      const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
+      const result = await parser.readBackupJson(stream, {known, validate, record: lighten});
+      const doc = result.document;
+      if (result.unchanged) return {unchanged: true, header: doc};
+      const {records, candidate_snapshots, ...header} = doc;
+      return {header, records, candidates: candidate_snapshots || [], date_events: doc.date_events || [],
+        ...(Array.isArray(doc.history_days) ? {history_days: doc.history_days} : {})};
     }
 
     function finish(result, name) {
@@ -210,6 +92,27 @@
 
     const pscubeModule = () => import('./pscube/viewer_bridge.mjs');
     const pscubeBridge = async () => (await pscubeModule()).createPscubeBridge();
+    let pickedEvents = null;
+    async function readStored() {
+      const db = await open();
+      try {
+        return await new Promise((resolve, reject) => {
+          const request = db.transaction(STORE).objectStore(STORE).get('data');
+          request.onsuccess = () => resolve(request.result ?? null);
+          request.onerror = () => reject(request.error);
+        });
+      } finally { db.close(); }
+    }
+    async function readEventMetadata() {
+      if (await pscubeActive()) return null;
+      let text = await readStored();
+      if (!text) return null;
+      const stream = new Blob([text]).stream();
+      text = null;
+      const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
+      const {document: doc} = await parser.readBackupJson(stream, {skipRecordValues: true});
+      return JSON.stringify({records: [], date_events: doc.date_events || []});
+    }
     async function pscubeActive() {
       if (typeof indexedDB === 'undefined') return false;
       const db = await open();
@@ -225,6 +128,7 @@
     return {
       // ファイルを選んで読む。選ばなければ null。
       pick() {
+        pickedEvents = null;
         return new Promise((resolve, reject) => {
           const input = document.createElement('input');
           input.type = 'file';
@@ -238,7 +142,12 @@
               const head = await file.slice(0, 4096).text();
               if (/\.webarchive$/i.test(file.name) || head.startsWith('bplist') || head.includes('WebMainResource') || /"format"\s*:\s*"pscube-viewer"/.test(head) || (/"rack"\s*:/.test(head) && /"graph"\s*:/.test(head))) {
                 resolve(await (await pscubeModule()).readPscubeFiles([file]));
-              } else resolve(finish(await parse(file.stream()), file.name));
+              } else {
+                const result = await parse(file.stream());
+                // 別タブで入力した直後のイベントも拾う。古い台のオブジェクトは作らない。
+                try { pickedEvents = await readEventMetadata(); } catch { /* 表示中の入力を引き継ぐ。 */ }
+                resolve(finish(result, file.name));
+              }
             }
             catch (error) { reject(error); }
           };
@@ -246,6 +155,7 @@
           input.click();
         });
       },
+      pickedEvents() { return pickedEvents; },
       // 同じサイトの中のファイルだけ（手元での確認用）。外部のURLは読まない。
       async fromUrl(url) {
         if (!url || /^[a-z]+:/i.test(url) || url.startsWith('//')) return null;
@@ -359,29 +269,24 @@
           else localStorage.removeItem('database-viewer-remote');
         } catch (_) {}
       },
-      async save(text) {
-        const pscube = JSON.parse(text).format === 'pscube-viewer';
+      async save(text, meruhen = false) {
+        // Dartで検査・組み立て済みのメルヘンJSONは、保存のために全文を解析し直さない。
+        const pscube = !meruhen && JSON.parse(text).format === 'pscube-viewer';
         if (pscube) await (await pscubeBridge()).save(text);
         const db = await open();
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction(STORE, 'readwrite');
-          if (!pscube) tx.objectStore(STORE).put(text, 'data');
-          tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
-          tx.oncomplete = resolve;
-          tx.onerror = () => reject(tx.error);
-        });
-        db.close();
+        try {
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, 'readwrite');
+            if (!pscube) tx.objectStore(STORE).put(text, 'data');
+            tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
+            tx.oncomplete = resolve;
+            tx.onerror = tx.onabort = () => reject(tx.error || new Error('端末に保存できませんでした。'));
+          });
+        } finally { db.close(); }
       },
       async load() {
         if (await pscubeActive()) return (await pscubeBridge()).load();
-        const db = await open();
-        const value = await new Promise((resolve, reject) => {
-          const request = db.transaction(STORE).objectStore(STORE).get('data');
-          request.onsuccess = () => resolve(request.result ?? null);
-          request.onerror = () => reject(request.error);
-        });
-        db.close();
-        return value;
+        return readStored();
       },
       async exportBackup() { return (await pscubeBridge()).exportBackup(); },
       // 共有カレンダー（EVENT_CALENDAR.md、2026-10-08）：共有ファイルを読む・イベントを送る（web/shared_events.mjs）。
