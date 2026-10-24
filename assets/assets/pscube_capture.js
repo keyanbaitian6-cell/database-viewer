@@ -18,8 +18,9 @@ const graphDay = value => {
   return day;
 };
 
-/** P’s CUBEの連続グラフの元数値。各日の始点と終点の差がその日の差枚。 */
-function netMedalsOfProbe(raw) {
+/** 各日の始点と終点から差枚を計算する。欠測・不正な日は他の日へ波及させない。
+ * 手動貼り付けは選択日を確認する。取り込みでは選択日が欠測でも正常な過去日を返す。 */
+function netMedalsOfProbe(raw, {requireSelected = true} = {}) {
   const rack = typeof raw?.rack === 'string' && /^\d+$/.test(raw.rack) ? Number(raw.rack) : raw?.rack;
   if (!raw || !Number.isSafeInteger(rack) || rack < 1 ||
       !/^\d{8}$/.test(raw.day ?? '') || !raw.graph ||
@@ -29,20 +30,29 @@ function netMedalsOfProbe(raw) {
   const selectedDay = graphDay(Number(raw.day));
   const factor = raw.graph.anjYUnit ?? 1;
   if (!Number.isFinite(factor) || factor <= 0 || factor > 100000) fail('グラフの単位が不正です。');
-  const found = new Map(), fields = new Set();
+  const found = new Map(), days = new Set(), fields = new Set(), lines = [];
+  // 日付と系列の対応が曖昧な応答は、個々の点を採用する前に全体を拒否する。
   for (const line of raw.graph.datas.g) {
+    if (!line || typeof line !== 'object') fail('グラフの日付・系列が不正です。');
     const day = graphDay(line.YMD_biz), x = line.xField, y = line.yField;
-    if (day > selectedDay || found.has(day) || typeof x !== 'string' || typeof y !== 'string' ||
-        !/^out-\d+$/.test(x) || !/^value-\d+$/.test(y) || fields.has(y)) fail('グラフの日付・系列が不正です。');
-    fields.add(y);
-    const points = raw.graph.datas.p.filter(p => p && Object.hasOwn(p, x) && Object.hasOwn(p, y));
+    if (day > selectedDay || days.has(day) || typeof x !== 'string' || typeof y !== 'string' ||
+        !/^out-\d+$/.test(x) || !/^value-\d+$/.test(y) || fields.has(x) || fields.has(y)) {
+      fail('グラフの日付・系列が不正です。');
+    }
+    days.add(day); fields.add(x); fields.add(y); lines.push({day,x,y});
+  }
+  const blank = value => value == null || value === '';
+  for (const {day,x,y} of lines) {
+    // 両方空の組は点ではない。片側だけ欠けた点は残して、その日を不正と判定する。
+    const points = raw.graph.datas.p.filter(p => p && (Object.hasOwn(p,x) || Object.hasOwn(p,y)) &&
+      !(blank(p[x]) && blank(p[y])));
     if (points.length < 2 || points.some((p, i) => !graphSafe(p[x]) || !graphSafe(p[y]) ||
-        (i && p[x] < points[i - 1][x]))) fail('グラフの元数値が不正です。');
+        (i && p[x] < points[i - 1][x]))) continue;
     const net = (points.at(-1)[y] - points[0][y]) * factor;
-    if (!Number.isSafeInteger(net) || Math.abs(net) > 1000000) fail('差枚の数値が不正です。');
+    if (!Number.isSafeInteger(net) || Math.abs(net) > 1000000) continue;
     found.set(day, net);
   }
-  if (!found.has(selectedDay)) fail('選択日のグラフがありません。');
+  if (requireSelected && !found.has(selectedDay)) fail('選択日のグラフがありません。');
   return found;
 }
 
@@ -69,10 +79,12 @@ async function capturePageWithNet(page, site = window) {
         dataType: 'json', timeout: 12000,
       }).done(resolve).fail((xhr) => reject(new Error(`通信に失敗しました（HTTP ${xhr?.status ?? '?'}）`)));
     });
-    const values = netMedalsOfProbe({rack, day, graph: response?.Graph?.src});
-    return {...captured, ...validateData({...captured, records:captured.records.map(record => ({
+    const values = netMedalsOfProbe({rack, day, graph: response?.Graph?.src}, {requireSelected:false});
+    const result = {...captured, ...validateData({...captured, records:captured.records.map(record => ({
       ...record, ...(values.has(record.day) ? {net_medals: values.get(record.day)} : {}),
     }))})};
+    if (!values.has(dayFromCompact(day))) result.net_warning = '差枚は未取得：選択日のグラフがありません。';
+    return result;
   } catch (error) {
     return {...captured, net_warning: `差枚は未取得：${String(error?.message ?? error).slice(0, 120)}`};
   }
