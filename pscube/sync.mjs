@@ -35,6 +35,7 @@ export function buildBackup(data, now = new Date()) {
   const valid = validateData(data);
   return { format: valid.format, version: 1, kind: 'backup', source: 'browser', exported_at: timestampWithOffset(now),
     machines: valid.machines, records: valid.records,
+    ...(valid.sync_status ? {sync_status:valid.sync_status} : {}),
     ...(valid.date_events ? {date_events:valid.date_events} : {}),
     rack_captures: valid.records.filter(r => r.graph?.kind === 'daily').map(recordKey) };
 }

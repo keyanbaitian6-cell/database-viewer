@@ -1,3 +1,4 @@
+import {makeNetProbe, validateNetCapture, trimNetProbes, mergeNetCapture, makeSyncWrite, mergeSyncStatus} from '../capture_health.mjs';
 export const FORMAT = 'pscube-viewer';
 export const emptyData = () => ({ format: FORMAT, version: 1, machines: [], records: [] });
 const fail = message => { throw new Error(message); };
@@ -18,7 +19,7 @@ const graphDay = value => {
 
 /** 各日の始点と終点から差枚を計算する。欠測・不正な日は他の日へ波及させない。
  * 手動貼り付けは選択日を確認する。取り込みでは選択日が欠測でも正常な過去日を返す。 */
-export function netMedalsOfProbe(raw, {requireSelected = true} = {}) {
+export function netMedalsOfProbe(raw, {requireSelected = true, reasons = new Map()} = {}) {
   const rack = typeof raw?.rack === 'string' && /^\d+$/.test(raw.rack) ? Number(raw.rack) : raw?.rack;
   if (!raw || !Number.isSafeInteger(rack) || rack < 1 ||
       !/^\d{8}$/.test(raw.day ?? '') || !raw.graph ||
@@ -44,10 +45,11 @@ export function netMedalsOfProbe(raw, {requireSelected = true} = {}) {
     // 両方空の組は点ではない。片側だけ欠けた点は残して、その日を不正と判定する。
     const points = raw.graph.datas.p.filter(p => p && (Object.hasOwn(p,x) || Object.hasOwn(p,y)) &&
       !(blank(p[x]) && blank(p[y])));
-    if (points.length < 2 || points.some((p, i) => !graphSafe(p[x]) || !graphSafe(p[y]) ||
-        (i && p[x] < points[i - 1][x]))) continue;
+    if (points.length < 2) { reasons.set(day,points.length ? 'short_series' : 'empty'); continue; }
+    if (points.some((p, i) => !graphSafe(p[x]) || !graphSafe(p[y]) ||
+        (i && p[x] < points[i - 1][x]))) { reasons.set(day,'invalid_points'); continue; }
     const net = (points.at(-1)[y] - points[0][y]) * factor;
-    if (!Number.isSafeInteger(net) || Math.abs(net) > 1000000) continue;
+    if (!Number.isSafeInteger(net) || Math.abs(net) > 1000000) { reasons.set(day,'invalid_net'); continue; }
     found.set(day, net);
   }
   if (requireSelected && !found.has(selectedDay)) fail('選択日のグラフがありません。');
@@ -65,26 +67,45 @@ export async function capturePageWithNet(page, site = window) {
   if (!url.pathname.endsWith('nc-v06-001.php')) return captured;
   const rack = Number(url.searchParams.get('cd_dai'));
   const day = url.hash.slice(1);
+  const checked_at = new Date().toISOString();
+  let graph, networkStatus, started = false;
+  const diagnose = (records, reason, values = new Map(), reasons = new Map()) => {
+    const missing = records.findIndex(r => !values.has(r.day));
+    const sample = graph && missing >= 0 ? makeNetProbe({rack,day,graph},records) : {};
+    return records.map((r,i) => ({...r,net_capture:{version:1,
+      status:values.has(r.day) ? 'ok' : reason === 'network' ? 'network' : reason === 'not_ready' ? 'unavailable' :
+        ['missing_series','empty'].includes(reasons.get(r.day) || reason) ? 'empty' : 'invalid',
+      reason:values.has(r.day) ? 'ok' : reasons.get(r.day) || reason,checked_at,
+      ...(networkStatus != null ? {http_status:networkStatus} : {}),...(i===missing ? sample : {})}}));
+  };
   try {
     if (!site.api?.apikey || !site.api?.token || typeof site.jQuery?.ajax !== 'function') {
       fail('サイトの通信の準備ができていません');
     }
+    started = true;
     const response = await new Promise((resolve, reject) => {
       site.jQuery.ajax({
         url: 'nc-m06-003.php',
         data: {cd_dai: String(rack), YMD_biz: day,
           apikey: site.api.apikey, _i: site.api.token._i, _t: site.api.token._t},
         dataType: 'json', timeout: 12000,
-      }).done(resolve).fail((xhr) => reject(new Error(`通信に失敗しました（HTTP ${xhr?.status ?? '?'}）`)));
+      }).done(resolve).fail((xhr) => {
+        networkStatus = Number.isInteger(xhr?.status) && xhr.status >= 0 && xhr.status <= 599 ? xhr.status : 0;
+        reject(new Error(`通信に失敗しました（HTTP ${xhr?.status ?? '?'}）`));
+      });
     });
-    const values = netMedalsOfProbe({rack, day, graph: response?.Graph?.src}, {requireSelected:false});
-    const result = {...captured, ...validateData({...captured, records:captured.records.map(record => ({
+    graph = response?.Graph?.src;
+    const reasons = new Map();
+    const values = netMedalsOfProbe({rack, day, graph}, {requireSelected:false,reasons});
+    const rows = captured.records.map(record => ({
       ...record, ...(values.has(record.day) ? {net_medals: values.get(record.day)} : {}),
-    }))})};
+    }));
+    const result = {...captured, ...validateData({...captured, records:diagnose(rows,'missing_series',values,reasons)})};
     if (!values.has(dayFromCompact(day))) result.net_warning = '差枚は未取得：選択日のグラフがありません。';
     return result;
   } catch (error) {
-    return {...captured, net_warning: `差枚は未取得：${String(error?.message ?? error).slice(0, 120)}`};
+    return {...captured, records:diagnose(captured.records,!started ? 'not_ready' : networkStatus != null ? 'network' : 'invalid_response'),
+      net_warning: `差枚は未取得：${String(error?.message ?? error).slice(0, 120)}`};
   }
 }
 function dayFromCompact(s) {
@@ -413,19 +434,25 @@ export function validateData(raw) {
       graph = { kind: g.kind, zero_y: g.zero_y, points: g.points.map(p => [...p]) };
     }
     if (r.observed_at != null && (typeof r.observed_at !== 'string' || !Number.isFinite(Date.parse(r.observed_at)))) fail('更新時刻が不正です。');
+    const netCapture = validateNetCapture(r.net_capture);
+    if (netCapture?.probe && (netCapture.probe.rack !== r.rack || !netCapture.probe.numbers.some(n => n.day===r.day &&
+        ['bb','rb','at_art','games','my'].every(k => n[k]===r[k])))) fail('差枚の取得診断と台の数値が一致しません。');
     return { ...base, rack: r.rack, day: r.day, bb: r.bb, rb: r.rb, at_art: r.at_art, games: r.games, my: r.my,
       detail_url: url?.href ?? null, observed_at: r.observed_at ?? null, graph,
       ...(external ? {source_site:'anaslo', source_url:r.source_url, source_sha256:r.source_sha256,
         source_machine:r.source_machine, source_probabilities:r.source_probabilities, source_graph:r.source_graph} : {}),
-      ...(external ? {net_medals:null} : r.net_medals == null ? {} : {net_medals: r.net_medals}) };
+      ...(external ? {net_medals:null} : r.net_medals == null ? {} : {net_medals: r.net_medals}),
+      ...(netCapture ? {net_capture:netCapture} : {}) };
   });
   if (new Set(machines.map(machineKey)).size !== machines.length || new Set(records.map(recordKey)).size !== records.length) fail('同じ機種・台が重複しています。');
   const known = new Set(machines.map(machineKey));
   if (records.some(r => !known.has(machineKey(r)))) fail('台に対応する機種情報がありません。');
+  trimNetProbes(records);
   const dateEvents = validateDateEvents(raw.date_events, raw.suffix_events);
   if (raw.history_days != null && (!Array.isArray(raw.history_days) || !raw.history_days.every(validDay) ||
       new Set(raw.history_days).size !== raw.history_days.length)) fail('履歴の日付一覧が不正です。');
-  return { format: FORMAT, version: 1, machines, records, ...(raw.history === true ? {history: true} : {}),
+  const syncStatus = mergeSyncStatus(raw.sync_status,makeSyncWrite(raw.source,raw.exported_at,records));
+  return { format: FORMAT, version: 1, machines, records, ...(syncStatus ? {sync_status:syncStatus} : {}), ...(raw.history === true ? {history: true} : {}),
     ...(raw.history_days ? {history_days: raw.history_days} : {}),
     ...(dateEvents.length ? {date_events:dateEvents} : {}) };
 }
@@ -462,14 +489,31 @@ export function mergeData(stored, incoming) {
         : alternate.graph?.kind === 'daily' ? alternate.graph : preferred.graph ?? alternate.graph;
     }
     const alternate = older ? r : previous;
-    records.set(key, { ...preferred, graph,
+    const netCapture = mergeNetCapture(preferred,alternate,sameNumbers);
+    records.set(key, { ...preferred, graph, ...(netCapture ? {net_capture:netCapture} : {}),
       ...(sameNumbers && preferred.net_medals == null && alternate.net_medals != null ? {net_medals:alternate.net_medals} : {}) });
   }
   // Events are independent of machine/rack data. A removal is retained as a dated
   // null name so an older backup cannot bring the event back.
   return validateData({ ...emptyData(), ...(old.history || fresh.history ? {history: true} : {}), machines: [...machines.values()], records: [...records.values()],
+    sync_status:mergeSyncStatus(old.sync_status,fresh.sync_status),
     ...(old.history_days || fresh.history_days ? {history_days: [...new Set([...(old.history_days || []), ...(fresh.history_days || [])])]} : {}),
     date_events:mergeDateEvents(old.date_events, fresh.date_events) });
+}
+
+/** ブラウザの補完は既存の同じ台・日・数値の欠測差枚だけ。記録の追加や上書きを行わない。 */
+export function mergeNetSupplement(stored, incoming, report = {}) {
+  const old=validateData(stored), fresh=validateData(incoming), records=new Map(old.records.map(r=>[recordKey(r),r]));
+  for(const key of ['applied','unmatched','mismatched','known']) if (report[key]==null) report[key]=0;
+  for (const value of fresh.records.filter(r=>r.net_medals!=null)) {
+    const key=recordKey(value),r=records.get(key);
+    if (!r) {report.unmatched++;continue;}
+    if (r.source_site==='anaslo' || value.source_site==='anaslo' || !['bb','rb','at_art','games','my'].every(k=>r[k]===value[k])) {report.mismatched++;continue;}
+    if (r.net_medals!=null) {report.known++;continue;}
+    report.applied++;
+    records.set(key,{...r,net_medals:value.net_medals,...(value.net_capture ? {net_capture:value.net_capture} : {})});
+  }
+  return validateData({...old,records:[...records.values()],sync_status:mergeSyncStatus(old.sync_status,fresh.sync_status)});
 }
 
 /** 沖ドキ（「沖ドキ」「オキドキ」、半角も）は取り込みの対象外（メルヘンと同じ約束）。 */
