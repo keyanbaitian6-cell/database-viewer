@@ -260,6 +260,20 @@
           if (page) page.removeEventListener('visibilitychange', onVisibility);
         }
       },
+      // 台の画面を開いたときに、その日のグラフの線だけを読む（2026-10-25）。[通し番号, 線] の一覧のJSON。
+      async curves(url, refsText) {
+        if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url || '')) {
+          throw new Error('Googleドライブの自動読み込みが設定されていません。');
+        }
+        const { hedgedFetch } = (typeof window !== 'undefined' && window.databaseDriveFetch) || await import('./drive_fetch.mjs');
+        const { fetchViewerCurves } = await import('./viewer_parts.mjs');
+        const rows = await fetchViewerCurves(url, 'meruhen', JSON.parse(refsText), async request => {
+          const response = await hedgedFetch(request, { fetchImpl: (...args) => fetch(...args) });
+          if (!response.ok) throw new Error('Googleドライブから読めませんでした（' + response.status + '）。');
+          return response.json();
+        });
+        return JSON.stringify(rows);
+      },
       getRemote() {
         try { return localStorage.getItem('database-viewer-remote'); } catch (_) { return null; }
       },

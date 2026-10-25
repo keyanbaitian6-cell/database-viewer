@@ -32,12 +32,38 @@ function vpValidManifest(m, site) {
   if (m.version === 2 && (!Array.isArray(m.days) || new Set(m.days).size !== m.days.length ||
       m.days.some(day => !/^\d{4}-\d{2}-\d{2}$/.test(day)) ||
       [...days].some(([day, d]) => !m.days.includes(day) || d.bytes > VP_MAX_BYTES || d.count > 100000))) fail();
+  if (m.curve_parts !== undefined) {
+    if (m.version !== 2 || !Array.isArray(m.curve_parts) || m.curve_parts.length > 16384) fail();
+    const curves = new Set();
+    for (const c of m.curve_parts) {
+      if (!c || !/^[a-f0-9]{64}$/.test(c.hash) || curves.has(c.hash) || !/^\d{4}-\d{2}-\d{2}$/.test(c.day) ||
+          !m.days.includes(c.day) || !Number.isSafeInteger(c.count) || c.count < 1 ||
+          !Number.isSafeInteger(c.bytes) || c.bytes < 2 || c.bytes > VP_PART_BYTES) fail();
+      curves.add(c.hash);
+    }
+  }
   return m;
+}
+function vpPublicCurves(m) {
+  return m.curve_parts ? {curve_parts: m.curve_parts.map(({hash, day, count, bytes}) => ({hash, day, count, bytes}))} : {};
 }
 function vpPublic(m) {
   return {format: m.format, version: m.version, site: m.site, revision: m.revision,
     header: m.header, count: m.count, ...(m.version === 2 ? {days: m.days, history: true} : {}),
-    parts: m.parts.map(({hash, day, count, bytes}) => ({hash, day, count, bytes}))};
+    parts: m.parts.map(({hash, day, count, bytes}) => ({hash, day, count, bytes})), ...vpPublicCurves(m)};
+}
+// メルヘンのグラフの線は、閲覧用の記録から外して日ごとの線パーツに置く（2026-10-25、iPhoneのメモリ）。
+// 記録の graph_measurement.curve_index（その日の中の通し番号）と、線パーツの [番号, 線] を結ぶ。
+// 中身に日付を含め、別の日と同じ内容（同じハッシュ）にならないようにする。
+const VP_CURVES_FORMAT = 'database-viewer-curves';
+function vpCurveName(site, hash) { return 'database-viewer-curves-' + site + '-' + hash + '.json'; }
+function vpCurveRows(text, ref) {
+  const doc = JSON.parse(text), rows = doc && doc.curves;
+  if (!doc || doc.day !== ref.day || !Array.isArray(rows) || rows.length !== ref.count ||
+      rows.some(r => !Array.isArray(r) || r.length !== 2 || !Number.isSafeInteger(r[0]) || r[0] < 0 || !Array.isArray(r[1]))) {
+    throw new Error('グラフの線のデータが更新一覧と一致しません。');
+  }
+  return rows;
 }
 function vpRows(text, part) {
   const rows = JSON.parse(text);
@@ -273,7 +299,9 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
     }
   }
   // 日別に保存した過去分も既存画面へ渡す。画面・採点規則は変えない。
-  const doc = {...m.header, history: true, history_days: [...history.keys()].sort(), records: [...history].sort(([a], [b]) => a.localeCompare(b))
+  // グラフの線の参照（台の画面を開いたときに fetchViewerCurves で読む）は、端末に保存する見出しにも残す。
+  const curveRefs = vpPublicCurves(m);
+  const doc = {...m.header, ...curveRefs, history: true, history_days: [...history.keys()].sort(), records: [...history].sort(([a], [b]) => a.localeCompare(b))
     .flatMap(([day, texts]) => Object.values(texts).flatMap(text => {
       const rows = JSON.parse(text);
       if (!Array.isArray(rows) || rows.some(r => r?.day !== day)) throw new Error('保存した履歴の日付が一致しません。');
@@ -282,9 +310,27 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   const previousDays = vpCachedDays(cached);
   const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
     cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));
-  try { await vpStoreHistory(cache, key, cached, changed, {...m.header, parts_at: m.header.exported_at}); }
+  try { await vpStoreHistory(cache, key, cached, changed, {...m.header, ...curveRefs, parts_at: m.header.exported_at}); }
   catch (e) { throw new Error('履歴を端末に保存できませんでした。前の保存データは保持しています。空き容量とブラウザの保存設定を確認してください。'); }
   return doc;
+}
+// 1日分のグラフの線を読む（[通し番号, 線] の一覧）。refs は一覧の curve_parts のうちその日の分。
+async function fetchViewerCurves(url, site, refs, getJson) {
+  const endpoint = new URL(url); endpoint.search = ''; endpoint.hash = '';
+  const rows = [];
+  for (const ref of refs) {
+    const request = new URL(endpoint);
+    if (site === 'pscube') request.searchParams.set('file', 'pscube');
+    request.searchParams.set('curves', ref.hash);
+    const result = await getJson(request.href);
+    if (result && typeof result.error === 'string') throw new Error(result.error);
+    if (result?.format !== VP_CURVES_FORMAT || result.hash !== ref.hash || typeof result.text !== 'string' ||
+        new TextEncoder().encode(result.text).length !== ref.bytes || await vpClientHash(result.text) !== ref.hash) {
+      throw new Error('グラフの線のデータが一致しません。');
+    }
+    rows.push(...vpCurveRows(result.text, ref));
+  }
+  return rows;
 }
 async function fetchViewerDocument(url, site, getJson, cache) {
   const check = new URL(url); check.searchParams.set('check', '1');
@@ -299,4 +345,4 @@ async function fetchViewerDocument(url, site, getJson, cache) {
   }
 }
 
-export {fetchViewerParts, fetchViewerDocument, rememberViewerHistory, readViewerHistory};
+export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, readViewerHistory};

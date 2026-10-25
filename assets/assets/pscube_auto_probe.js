@@ -532,7 +532,9 @@ function autoPageState(rawUrl, dom) {
     const identity = new URL(url); identity.hash = '';
     // day：選ばれている日付タブ。取り込み日を指定しているとき、合っているかの確認に使う。
     const day = dayFromCompact(dom.querySelector('[data-ymd].selected').getAttribute('data-ymd'));
-    return { ready: true, kind: '全台一覧', signature: identity.href, day };
+    // days：並んでいる日付タブ（古い順）。取り込み日のタブが無い機種（新台・入れ替え）だけは、表示中の日が違っても
+    // 読み取りへ進め、保存側（Store）が確かめて飛ばす。それ以外の日付違いは今までどおり待つ（2026-10-22）。
+    return { ready: true, kind: '全台一覧', signature: identity.href, day, days: tableDays(dom) };
   }
   if (!/^#\d{8}$/.test(url.hash)) return { ready: false, reason: '台別ページの日付がまだ決まっていません' };
   if (dom.querySelectorAll('td.column').length !== 7) {
