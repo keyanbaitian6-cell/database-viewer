@@ -1,4 +1,4 @@
-export const APPLICATION_RELEASE = '013244a75edf';
+export const APPLICATION_RELEASE = 'ffe8aa28f95b';
 // 取得診断には固定の理由と数値だけを残す。認証値・HTML・自由文の応答は保存しない。
 export const NET_PROBE_MAX = 64 * 1024;
 export const NET_PROBE_BUDGET = 3 * 1024 * 1024;

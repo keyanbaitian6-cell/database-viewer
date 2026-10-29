@@ -302,6 +302,30 @@
         if (await pscubeActive()) return (await pscubeBridge()).load();
         return readStored();
       },
+      // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
+      // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
+      // （2026-10-29）。本体に前から入っている印も使う（Dart側で合わせる）。
+      async loadMarks() {
+        const db = await open();
+        try {
+          return await new Promise((resolve, reject) => {
+            const request = db.transaction(STORE).objectStore(STORE).get('rainbow_marks');
+            request.onsuccess = () => resolve(request.result ?? null);
+            request.onerror = () => reject(request.error);
+          });
+        } finally { db.close(); }
+      },
+      async saveMarks(text) {
+        const db = await open();
+        try {
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, 'readwrite');
+            tx.objectStore(STORE).put(text, 'rainbow_marks');
+            tx.oncomplete = resolve;
+            tx.onerror = tx.onabort = () => reject(tx.error || new Error('端末に保存できませんでした。'));
+          });
+        } finally { db.close(); }
+      },
       async exportBackup() { return (await pscubeBridge()).exportBackup(); },
       // 共有カレンダー（EVENT_CALENDAR.md、2026-10-08）：共有ファイルを読む・イベントを送る（web/shared_events.mjs）。
       async fetchShared(url, file) { return (await import('./shared_events.mjs')).fetchShared(url, file); },
