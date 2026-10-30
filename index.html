@@ -93,6 +93,13 @@
     const pscubeModule = () => import('./pscube/viewer_bridge.mjs');
     const pscubeBridge = async () => (await pscubeModule()).createPscubeBridge();
     let pickedEvents = null;
+    // 保存の診断（web/storage_report.mjs）に出す本体の大きさ。読み込み・保存のときに分かった文字数だけを控え、
+    // 診断のために本体を読み直さない。
+    let loadedSize = null;
+    const remember = (text, source) => {
+      if (typeof text === 'string') loadedSize = {chars: text.length, source};
+      return text;
+    };
     async function readStored() {
       const db = await open();
       try {
@@ -297,10 +304,21 @@
             tx.onerror = tx.onabort = () => reject(tx.error || new Error('端末に保存できませんでした。'));
           });
         } finally { db.close(); }
+        remember(text, pscube ? 'pscube' : 'meruhen');
       },
       async load() {
-        if (await pscubeActive()) return (await pscubeBridge()).load();
-        return readStored();
+        if (await pscubeActive()) return remember(await (await pscubeBridge()).load(), 'pscube');
+        return remember(await readStored(), 'meruhen');
+      },
+      // 保存の診断（「更新・差枚の取得状況」）。行の配列のJSON。
+      async storageReport() {
+        const diag = await import('./storage_report.mjs');
+        return JSON.stringify(diag.storageReportLines(await diag.collectStorageReport({loaded: loadedSize})));
+      },
+      // 重い読み込みの始まり・終わり。途中でページが終わったら、次に開いたときに数える（storage_report.mjs）。
+      async phase(name, done) {
+        const diag = await import('./storage_report.mjs');
+        (done ? diag.phaseFinished : diag.phaseStarted)(name);
       },
       // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
       // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
