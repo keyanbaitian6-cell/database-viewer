@@ -392,6 +392,13 @@ export function dateEventNames(events = []) {
   return [...latest].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja')).map(([name]) => name);
 }
 
+// アナスロで補った台の推定差枚（PC anaslo_net.valid・Dart validPscubeNetEstimate・共有カレンダー pscubeNetEstimate と
+// 同じ形、2026-11-06）。この読み取りと同期スクリプト（ここから作る）で落とさない。
+export function validNetEstimate(e) {
+  return !!e && typeof e === 'object' && !Array.isArray(e) && Object.keys(e).length === 3 && Number.isSafeInteger(e.value) &&
+    Math.abs(e.value) <= 1000000 && typeof e.sure === 'boolean' && e.method === 'anaslo-graph-v1';
+}
+
 export function validateAnasloRecord(r) {
   let url; try { url = new URL(r.source_url); } catch { fail('アナスロ履歴の出典が不正です。'); }
   if (url.origin !== 'https://ana-slo.com' || url.username || url.password || !url.pathname.startsWith(`/${r.day}-`) ||
@@ -428,6 +435,7 @@ export function validateData(raw) {
     if (external) validateAnasloRecord(r);
     for (const k of external ? ['bb', 'rb', 'at_art', 'games'] : ['bb', 'rb', 'at_art', 'games', 'my']) if (!integer(r[k])) fail('台の数値が不正です。');
     if (r.net_medals != null && (!Number.isSafeInteger(r.net_medals) || Math.abs(r.net_medals) > 1000000)) fail('差枚の数値が不正です。');
+    if (r.net_estimate != null && (!external || !validNetEstimate(r.net_estimate))) fail('推定差枚の形式が不正です。');
     let graph = null;
     if (r.graph != null) {
       const g = r.graph;
@@ -444,6 +452,7 @@ export function validateData(raw) {
       ...(external ? {source_site:'anaslo', source_url:r.source_url, source_sha256:r.source_sha256,
         source_machine:r.source_machine, source_probabilities:r.source_probabilities, source_graph:r.source_graph} : {}),
       ...(external ? {net_medals:null} : r.net_medals == null ? {} : {net_medals: r.net_medals}),
+      ...(external && r.net_estimate != null ? {net_estimate: {value: r.net_estimate.value, sure: r.net_estimate.sure, method: r.net_estimate.method}} : {}),
       ...(netCapture ? {net_capture:netCapture} : {}) };
   });
   if (new Set(machines.map(machineKey)).size !== machines.length || new Set(records.map(recordKey)).size !== records.length) fail('同じ機種・台が重複しています。');
@@ -474,7 +483,15 @@ export function mergeData(stored, incoming) {
   const occupied = new Set([...records.values()].map(rackDayKey));
   for (const r of fresh.records) {
     const key = recordKey(r), previous = records.get(key);
-    if (r.source_site === 'anaslo' && occupied.has(rackDayKey(r))) continue;
+    if (r.source_site === 'anaslo' && occupied.has(rackDayKey(r))) {
+      // 既にある台・日は補完で上書きしない。ただし同じアナスロのページの補完に、後で推定差枚を付けたときは
+      // 推定差枚だけ移す（PC _merge・Android _merge と同じ、2026-11-06）。
+      if (previous?.source_site === 'anaslo' && r.net_estimate && r.source_sha256 === previous.source_sha256 &&
+          JSON.stringify(r.net_estimate) !== JSON.stringify(previous.net_estimate ?? null)) {
+        records.set(key, {...previous, net_estimate: r.net_estimate});
+      }
+      continue;
+    }
     occupied.add(rackDayKey(r));
     if (!previous) { records.set(key, r); continue; }
     if (previous.source_site === 'anaslo' && r.source_site !== 'anaslo') { records.set(key, r); continue; }
