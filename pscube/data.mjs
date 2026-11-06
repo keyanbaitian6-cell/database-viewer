@@ -524,8 +524,11 @@ export const isExcludedMachine = name => /沖ドキ|オキドキ/.test(String(na
 /** 当たりが1回もない台（BB・RB・AT/ARTがすべて0、0回転を含む）。台別7日分は取りに行かない（PC・Androidと同じ）。 */
 export const noHits = r => r.bb + r.rb + r.at_art === 0;
 
+/** 台別7日分を取りに行かない台（2026-11-05）：当たり0回の台と、500G以下の台（採点の MIN_SCORED_GAMES と同じ。PC・Androidと同じ）。 */
+export const skipsRackPage = r => noHits(r) || (Number.isInteger(r.games) && r.games <= 500);
+
 export function progress(data, machine, day) {
   const records = data.records.filter(r => machineKey(r) === machineKey(machine) && r.day === day).sort((a, b) => a.rack - b.rack);
-  const pending = records.filter(r => r.graph?.kind !== 'daily' && !noHits(r));
+  const pending = records.filter(r => r.graph?.kind !== 'daily' && !skipsRackPage(r));
   return { records, pending, complete: machine.expected_count !== null && records.length === machine.expected_count };
 }
