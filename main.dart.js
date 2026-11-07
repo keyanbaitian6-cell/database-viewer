@@ -8549,7 +8549,7 @@ n.toString
 if(k===n)n=0
 else n=k<n?-1:1
 n=n>0}else n=!0
-if(n)q.m(0,l,k)}i=A.a(["\u3053\u306e\u30a2\u30d7\u30ea\u30fb\u95b2\u89a7\u30da\u30fc\u30b8\u306e\u7248\uff1a4fef780cf0ea"],t.s)
+if(n)q.m(0,l,k)}i=A.a(["\u3053\u306e\u30a2\u30d7\u30ea\u30fb\u95b2\u89a7\u30da\u30fc\u30b8\u306e\u7248\uff1a722eadb1a018"],t.s)
 B.b.I(i,A.bbV(a2,b,e,f))
 i.push("\u7aef\u672b\u5185\u306e\u6700\u65b0\u55b6\u696d\u65e5\uff1a")
 for(n=new A.bV(q,q.$ti.i("bV<1,2>")).gW(0);n.n();){j=n.d
@@ -10855,8 +10855,10 @@ B.b.aX(l,new A.aIM())
 k=A.H(l).i("V<1,j>")
 l=A.L(new A.V(l,new A.aIN(),k),k.i("ak.E"))
 h.m(0,m,l)}return h},
-aWY(a){var s="value"
-return t.f.b(a)&&a.gB(a)===3&&A.ci(a.h(0,s))&&Math.abs(A.c1(a.h(0,s)))<=1e6&&B.e.br(A.c1(a.h(0,s)),50)===0&&A.fV(a.h(0,"sure"))&&J.c(a.h(0,"method"),"site777-axis-pixels-v1")},
+aWY(a){var s="value",r=!1
+if(t.f.b(a))if(a.gB(a)===3)if(A.ci(a.h(0,s)))if(Math.abs(A.c1(a.h(0,s)))<=1e6)if(A.fV(a.h(0,"sure")))if(!J.c(a.h(0,"method"),"site777-axis-pixels-v2"))r=J.c(a.h(0,"method"),"site777-axis-pixels-v1")&&B.e.br(A.c1(a.h(0,s)),50)===0
+else r=!0
+return r},
 bbW(a){var s,r,q="source_sha256",p="source_machine",o=a.h(0,"source_url")
 o=o==null?null:J.fk(o)
 s=A.aME(o==null?"":o)
