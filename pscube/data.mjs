@@ -519,9 +519,18 @@ export function mergeData(stored, incoming) {
   const completeDays = new Set(fresh.history_days || []), freshKeys = new Set(fresh.records.map(recordKey));
   const records = new Map(old.records.filter(r => !completeDays.has(r.day) || freshKeys.has(recordKey(r))).map(r => [recordKey(r), r]));
   const rackDayKey = r => JSON.stringify([r.store, r.rate, r.rack, r.day]);
-  const occupied = new Set([...records.values()].map(rackDayKey));
+  // 台・日 → 記録の鍵。サイトセブンがアナスロの台を置き換えるとき、別表記の古い記録を消すため。
+  const occupied = new Map([...records].map(([key, r]) => [rackDayKey(r), key]));
   for (const r of fresh.records) {
-    const key = recordKey(r), previous = records.get(key);
+    const key = recordKey(r);
+    // サイトセブンはアナスロで補った台を置き換える（PC import_backup・Android と同じ、2026-11-07）。
+    // 機種名の表記が違っても同じ台・日のアナスロの記録は消す。P’s CUBE本来・サイトセブンどうしは置き換えない。
+    const occupantKey = occupied.get(rackDayKey(r));
+    if (r.source_site === 'site777' && occupantKey && records.get(occupantKey)?.source_site === 'anaslo') {
+      records.delete(occupantKey);
+      occupied.delete(rackDayKey(r));
+    }
+    const previous = records.get(key);
     if (['anaslo','site777'].includes(r.source_site) && occupied.has(rackDayKey(r))) {
       // 既にある台・日は補完で上書きしない。ただし同じアナスロのページの補完に、後で推定差枚を付けたときは
       // 推定差枚だけ移す（PC _merge・Android _merge と同じ、2026-11-06）。
@@ -537,7 +546,7 @@ export function mergeData(stored, incoming) {
       }
       continue;
     }
-    occupied.add(rackDayKey(r));
+    occupied.set(rackDayKey(r), key);
     if (!previous) { records.set(key, r); continue; }
     if (['anaslo','site777'].includes(previous.source_site) && !['anaslo','site777'].includes(r.source_site)) { records.set(key, r); continue; }
     const sameNumbers = ['bb', 'rb', 'at_art', 'games', 'my'].every(k => previous[k] === r[k]);
