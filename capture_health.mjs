@@ -1,4 +1,4 @@
-export const APPLICATION_RELEASE = 'adaa07a84a59';
+export const APPLICATION_RELEASE = '4290b0c1014e';
 // 取得診断には固定の理由と数値だけを残す。認証値・HTML・自由文の応答は保存しない。
 export const NET_PROBE_MAX = 64 * 1024;
 export const NET_PROBE_BUDGET = 3 * 1024 * 1024;
@@ -108,7 +108,8 @@ export function viewerNetCapture(value) {
 
 export function netCaptureLabel(record) {
   if (Number.isSafeInteger(record.net_medals)) return record.net_medals === 0 ? '取得済み（0枚）' : '取得済み';
-  if (['anaslo','site777'].includes(record.source_site)) return '出典に差枚なし';
+  // グラフから推定差枚を付けた台は、正確な差枚とは分けて「推定あり」（PC net_capture_label と同じ）。
+  if (['anaslo','site777'].includes(record.source_site)) return record.net_estimate != null ? '出典に差枚なし（推定あり）' : '出典に差枚なし';
   const reason = record.net_capture?.reason;
   return ({missing_series:'日別の系列なし',empty:'元数値が空',short_series:'元数値の点が不足',
     invalid_points:'元数値の形式不正',invalid_net:'差枚の範囲不正',invalid_response:'応答の形式不正',
