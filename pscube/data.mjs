@@ -409,6 +409,20 @@ export function validSite777NetEstimate(e) {
     (e.method === site777EstimateMethod || (e.method === site777LegacyEstimateMethod && e.value % 50 === 0));
 }
 
+// サイトセブンの台は、営業日の翌日0:30以降に取り込んだものを確定とする（2026-11-08 利用者「閉店時刻は23時半。
+// 0時前後には更新されるはず」→「翌0:30以降」）。PC site777_final・Dart site777Final と同じ。時刻が読めない台は確定（置き換えない）。
+export function site777Final(r) {
+  const captured = Date.parse(r?.source_captured_at), start = Date.parse(`${r?.day}T00:00:00+09:00`);
+  return !Number.isFinite(captured) || !Number.isFinite(start) || captured >= start + (24 * 60 + 30) * 60000;
+}
+
+// 確定前のサイトセブンの台を、あとで取り込んだサイトセブンの台で置き換えるか（PC site777_supersedes・Dart site777Supersedes と同じ）。
+export function site777Supersedes(old, fresh) {
+  if (!old || old.source_site !== 'site777' || fresh?.source_site !== 'site777' || site777Final(old)) return false;
+  const before = Date.parse(old.source_captured_at), after = Date.parse(fresh.source_captured_at);
+  return Number.isFinite(before) && Number.isFinite(after) && after > before;
+}
+
 export function validateAnasloRecord(r) {
   let url; try { url = new URL(r.source_url); } catch { fail('アナスロ履歴の出典が不正です。'); }
   if (url.origin !== 'https://ana-slo.com' || url.username || url.password || !url.pathname.startsWith(`/${r.day}-`) ||
@@ -527,9 +541,11 @@ export function mergeData(stored, incoming) {
   for (const r of fresh.records) {
     const key = recordKey(r);
     // サイトセブンはアナスロで補った台を置き換える（PC import_backup・Android と同じ、2026-11-07）。
-    // 機種名の表記が違っても同じ台・日のアナスロの記録は消す。P’s CUBE本来・サイトセブンどうしは置き換えない。
+    // 機種名の表記が違っても同じ台・日のアナスロの記録は消す。P’s CUBE本来は置き換えない。サイトセブンどうしは、
+    // 確定前（翌日0:30より前に取った）の台だけ、あとで取った台で置き換える（PC・Android と同じ、2026-11-08）。
     const occupantKey = occupied.get(rackDayKey(r));
-    if (r.source_site === 'site777' && occupantKey && records.get(occupantKey)?.source_site === 'anaslo') {
+    if (r.source_site === 'site777' && occupantKey && (records.get(occupantKey)?.source_site === 'anaslo' ||
+        site777Supersedes(records.get(occupantKey), r))) {
       records.delete(occupantKey);
       occupied.delete(rackDayKey(r));
     }
