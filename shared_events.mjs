@@ -4,7 +4,8 @@ import { hedgedFetch } from './drive_fetch.mjs';
 
 const SCRIPT_URL = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
 // rainbow：閲覧ページで付け外しした🌈（RAINBOW.md「iPhoneから付ける」、2026-10-11）。
-export const SHARED_FILES = ['events', 'pscube-events', 'rainbow', 'event-history', 'diagnostic', 'pscube-validation'];
+// daily-learning：日次学習・採用中の候補（DAILY_LEARNING.md）。2026-11-12、一覧に無く、iPhoneでGoogleへ問い合わせる前に止まっていた。
+export const SHARED_FILES = ['events', 'pscube-events', 'rainbow', 'event-history', 'diagnostic', 'pscube-validation', 'daily-learning'];
 const POST_TIMEOUT_MS = 30000;
 
 /** 共有ファイル（[file] は events・pscube-events）を読み、返事の文字をそのまま返す。 */
