@@ -52,27 +52,42 @@
       return record;
     }
 
+    const notBackup = (format) => new Error(format === 'pscube-viewer'
+      ? 'P’s CUBEのファイルです。P’s CUBEのページ（https://keyanbaitian6-cell.github.io/database-viewer/pscube/）の「ファイルを読み込む」で読み込んでください。'
+      : 'databaseのバックアップファイルではありません。');
+    const validate = doc => {
+      if (doc && typeof doc.error === 'string') throw new Error(doc.error);
+      if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) throw notBackup(doc?.format);
+      if (doc.version !== 1) throw new Error('対応していないバックアップのバージョンです。');
+      for (const name of ['candidate_snapshots', 'date_events']) {
+        if (name in doc && !Array.isArray(doc[name])) throw new Error(name + ' の形式が不正です。');
+      }
+    };
+    // 読んだ書き出し [doc] から、画面（Dart）へ渡す形を作る。parse（ストリーム）と fromDocument（読み込み済みの
+    // 内容）で同じ形にする。
+    const shape = doc => {
+      const {records, candidate_snapshots, ...header} = doc;
+      return {header, records, candidates: candidate_snapshots || [], date_events: doc.date_events || [],
+        ...(Array.isArray(doc.history_days) ? {history_days: doc.history_days} : {})};
+    };
+
     // [known] は表示中の内容の書き出し時刻。先頭の行の exported_at が同じなら、
     // 中身も同じなので、そこで読むのをやめて { unchanged: true } を返す。
     async function parse(stream, known) {
-      const notBackup = (format) => new Error(format === 'pscube-viewer'
-        ? 'P’s CUBEのファイルです。P’s CUBEのページ（https://keyanbaitian6-cell.github.io/database-viewer/pscube/）の「ファイルを読み込む」で読み込んでください。'
-        : 'databaseのバックアップファイルではありません。');
-      const validate = doc => {
-        if (doc && typeof doc.error === 'string') throw new Error(doc.error);
-        if (!doc || doc.format !== 'database-backup' || !Array.isArray(doc.records)) throw notBackup(doc?.format);
-        if (doc.version !== 1) throw new Error('対応していないバックアップのバージョンです。');
-        for (const name of ['candidate_snapshots', 'date_events']) {
-          if (name in doc && !Array.isArray(doc[name])) throw new Error(name + ' の形式が不正です。');
-        }
-      };
       const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
       const result = await parser.readBackupJson(stream, {known, validate, record: lighten});
       const doc = result.document;
       if (result.unchanged) return {unchanged: true, header: doc};
-      const {records, candidate_snapshots, ...header} = doc;
-      return {header, records, candidates: candidate_snapshots || [], date_events: doc.date_events || [],
-        ...(Array.isArray(doc.history_days) ? {history_days: doc.history_days} : {})};
+      return shape(doc);
+    }
+
+    // 日別の部品から組み立てた内容（メモリ上のオブジェクト）を、parse と同じ検査・同じ形にする。
+    // 文字列に直して、ストリームで読み直す（全履歴の文字列と解析結果をもう1組つくる）必要はない。
+    function fromDocument(doc, known) {
+      validate(doc);
+      for (const record of doc.records) lighten(record);
+      if (known && doc.exported_at === known) return {unchanged: true, header: doc};
+      return shape(doc);
     }
 
     function finish(result, name) {
@@ -109,6 +124,22 @@
           request.onerror = () => reject(request.error);
         });
       } finally { db.close(); }
+    }
+    // 端末の旧本文の日がすべて日別キャッシュ（Googleの部品）にあるか。旧本文は1件ずつ読み、日だけを控える（全件の
+    // オブジェクトは作らない）。確かめられなければ false（今までどおり、旧本文を解析して引き継ぐ）。
+    async function storedHistoryCovered(url, covers) {
+      try {
+        let text = await readStored();
+        if (!text) return true; // 旧本文がなければ、引き継ぐものも無い。
+        remember(text, 'meruhen'); // 診断の「本体の大きさ」（load と同じ）。
+        const days = new Set();
+        const stream = new Blob([text]).stream();
+        text = null;
+        const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
+        const result = await parser.readBackupJson(stream, {record: row => { if (typeof row?.day === 'string') days.add(row.day); return null; }});
+        if (!Array.isArray(result.document.records)) return false;
+        return await covers(url, 'meruhen', days);
+      } catch { return false; }
     }
     async function readEventMetadata() {
       if (await pscubeActive()) return null;
@@ -216,16 +247,18 @@
             version = checked.version ?? null;
             if (isUnchanged(versions.get(), version, known || null)) return null;
             if (checked.parts && globalThis.crypto?.subtle) {
-              const {fetchViewerParts, rememberViewerHistory} = await import('./viewer_parts.mjs');
-              const saved = await window.databaseViewer.load();
-              if (saved) await rememberViewerHistory(url, 'meruhen', JSON.parse(saved));
+              const {fetchViewerParts, rememberViewerHistory, viewerHistoryCovers} = await import('./viewer_parts.mjs');
+              // 端末の旧本文の日がすべて日別キャッシュにあれば、旧本文を引き継ぐ処理（全件の解析）は何もしないので省く。
+              if (!(await storedHistoryCovered(url, viewerHistoryCovers))) {
+                const saved = await window.databaseViewer.load();
+                if (saved) await rememberViewerHistory(url, 'meruhen', JSON.parse(saved));
+              }
               const doc = await fetchViewerParts(url, 'meruhen', checked.parts, async request => {
                 wait(); const response = await hedgedFetch(request, options);
                 if (!response.ok) throw Object.assign(new Error('http'), {status: response.status});
                 return response.json();
               });
-              const response = new Response(JSON.stringify(doc), {headers: {'content-type': 'application/json'}});
-              full = {response, stream: response.body};
+              full = {document: doc};
             } else if (checked.stream) full = { response: checked.response, stream: checked.stream };
             else if (!checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
             else {
@@ -238,18 +271,25 @@
             if (error && error.status) throw httpError(error.status);
             throw error && error.network ? error.network : error;
           }
-          if ((full.response.headers.get('content-type') || '').includes('text/html')) {
+          if (!full.document && (full.response.headers.get('content-type') || '').includes('text/html')) {
             throw new Error('スクリプトの公開設定を確認してください（アクセスできるユーザー：全員）。');
           }
           wait();
-          // 届くたびに待ち時間を数え直す。
-          const body = full.stream.pipeThrough(new TransformStream({
-            transform(chunk, controller) {
-              wait();
-              controller.enqueue(chunk);
-            },
-          }));
-          const result = await parse(body, known || null);
+          let result;
+          if (full.document) {
+            // 日別の部品から組み立てた内容は、文字列に直さず、そのまま検査して使う。
+            result = fromDocument(full.document, known || null);
+            full.document = null;
+          } else {
+            // 届くたびに待ち時間を数え直す。
+            const body = full.stream.pipeThrough(new TransformStream({
+              transform(chunk, controller) {
+                wait();
+                controller.enqueue(chunk);
+              },
+            }));
+            result = await parse(body, known || null);
+          }
           // 目印は、中身を読み終えて正しいと分かってから覚える。
           if (result.unchanged) {
             if (version) versions.set({ version, exported_at: known });
@@ -319,6 +359,25 @@
       async phase(name, done) {
         const diag = await import('./storage_report.mjs');
         (done ? diag.phaseFinished : diag.phaseStarted)(name);
+      },
+      // 端末に保存した本文の要約（Googleドライブの更新で、古い日を足す必要がないか調べるため）。記録の中身は
+      // 読み込まず、記録を除いた外枠の原文（envelope）と、記録に出てくる日（days）だけを返す。JSON。
+      // 無い・読めない・P’s CUBEのときは null（呼び出し側は、本文を読む今までの方法を使う）。
+      async loadSummary() {
+        if (await pscubeActive()) return null;
+        try {
+          let text = await readStored();
+          if (!text) return null;
+          const days = new Set();
+          const stream = new Blob([text]).stream();
+          text = null;
+          const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
+          const result = await parser.readBackupJson(stream, {keepEnvelope: true, record: row => {
+            if (row && typeof row === 'object' && !Array.isArray(row) && typeof row.day === 'string') days.add(row.day);
+            return null;
+          }});
+          return JSON.stringify({envelope: result.envelope, days: [...days]});
+        } catch { return null; }
       },
       // 前回のGoogleドライブの更新が途中で終わっていたら、起動時の自動更新を止めている期限（ISO）。無ければ null。
       async autoUpdateHold() {

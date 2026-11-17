@@ -256,6 +256,23 @@ async function rememberViewerHistory(url, site, doc, cache = vpCache(), replaceD
   const {records, ...header} = doc;
   await vpStoreHistory(cache, key, cached, updates, replaceDays ? header : cached?.header || header);
 }
+// 端末の旧本文に出てくる日 [bodyDays] が、すべて接続先の日別キャッシュにあるか。あるなら rememberViewerHistory は何もしない
+// （全件の解析も保存も要らない）ので、旧本文を丸ごと解析しないで済ませる。日別キャッシュは1日ずつ読む。
+// 確かめられない（旧形式・読めない）ときは false（呼び出し側は今までどおり rememberViewerHistory を使う）。
+async function viewerHistoryCovers(url, site, bodyDays, cache = vpCache()) {
+  if (!cache.stream) return false;
+  let header = null;
+  const have = new Set();
+  try {
+    for await (const value of cache.stream(vpEndpointKey(url, site))) {
+      if (value.header) { header = value.header; continue; }
+      if (Object.keys(value.parts || {}).length) have.add(value.day);
+    }
+  } catch { return false; }
+  if (!header) return false;
+  for (const day of bodyDays) if (!have.has(day)) return false;
+  return true;
+}
 async function vpClientHash(text) {
   const data = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(data)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -293,11 +310,13 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   try { cached = await cache.get(key); }
   catch { throw new Error('履歴を端末から読み出せませんでした。保存データは変更していません。'); }
   const parts = new Map(), missing = [];
+  // 中身の一致を確かめ終えた部品（ハッシュ）と、その行。同じ部品を何度も計算・解析しない（更新1回のメモリの山を下げる、2026-11-18）。
+  const verified = new Set(), parsedRows = new Map();
   for (const p of m.parts) {
     const text = cached?.parts?.[p.hash];
     // 端末内の欠損・破損も、当該パーツだけ再取得する。
     if (typeof text === 'string' && new TextEncoder().encode(text).length === p.bytes && await vpClientHash(text) === p.hash) {
-      vpRows(text, p); parts.set(p.hash, text);
+      parsedRows.set(p.hash, vpRows(text, p)); verified.add(p.hash); parts.set(p.hash, text);
     } else missing.push(p);
   }
   // 前回の読み込みが途中で失敗していたら、読み終えていた部品を使う（一致を確かめたものだけ）。
@@ -308,8 +327,9 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
     for (let i = missing.length - 1; saved && i >= 0; i--) {
       const p = missing[i], text = saved.get(p.hash);
       if (typeof text !== 'string' || new TextEncoder().encode(text).length !== p.bytes || await vpClientHash(text) !== p.hash) continue;
-      try { vpRows(text, p); } catch { continue; }
-      parts.set(p.hash, text); missing.splice(i, 1);
+      let rows;
+      try { rows = vpRows(text, p); } catch { continue; }
+      parsedRows.set(p.hash, rows); verified.add(p.hash); parts.set(p.hash, text); missing.splice(i, 1);
     }
   }
   for (let i = 0; i < missing.length; i += VP_BATCH) {
@@ -324,7 +344,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       const p = batch[j], item = result.parts[j];
       if (item?.hash !== p.hash || typeof item.text !== 'string' || new TextEncoder().encode(item.text).length !== p.bytes ||
           await vpClientHash(item.text) !== p.hash) throw new Error('閲覧用の日別データが一致しません。');
-      vpRows(item.text, p); parts.set(p.hash, item.text);
+      parsedRows.set(p.hash, vpRows(item.text, p)); verified.add(p.hash); parts.set(p.hash, item.text);
     }
     // 次の部品で失敗しても、ここまでの分は次の読み込みで使う（残りが無ければ保存しない）。
     if (pending && i + VP_BATCH < missing.length) {
@@ -339,7 +359,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   const restored = {...(cached?.parts || {})};
   for (const [hash, text] of parts) restored[hash] = text;
   for (const [hash, text] of Object.entries(restored)) {
-    if (await vpClientHash(text) === hash) continue;
+    if (verified.has(hash) || await vpClientHash(text) === hash) { verified.add(hash); continue; }
     if (covered.includes(cached?.partDays?.[hash])) { delete restored[hash]; continue; }
     let day;
     try { day = JSON.parse(text)?.[0]?.day; } catch { /* 日付不明は自動で破棄しない */ }
@@ -355,9 +375,11 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   for (const day of covered) updates[day] = {};
   for (const p of m.parts) updates[p.day][p.hash] = parts.get(p.hash);
   for (const [day, value] of Object.entries(updates)) history.set(day, value);
+  // 更新に入らない日の部品は、すべて restored の検査（上）を通っている（壊れたものは消すか、例外で止まる）。
+  // ここで同じハッシュをもう一度計算しない。
   for (const [day, value] of history) {
     if (Object.hasOwn(updates, day)) continue;
-    for (const [hash, text] of Object.entries(value)) if (await vpClientHash(text) !== hash) {
+    for (const [hash] of Object.entries(value)) if (!verified.has(hash)) {
       throw new Error('保存した過去の履歴が破損しています。元バックアップから復元してください。保存データは変更していません。');
     }
   }
@@ -365,8 +387,8 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   // グラフの線の参照（台の画面を開いたときに fetchViewerCurves で読む）は、端末に保存する見出しにも残す。
   const curveRefs = vpPublicCurves(m);
   const doc = {...m.header, ...curveRefs, history: true, history_days: [...history.keys()].sort(), records: [...history].sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([day, texts]) => Object.values(texts).flatMap(text => {
-      const rows = JSON.parse(text);
+    .flatMap(([day, texts]) => Object.entries(texts).flatMap(([hash, text]) => {
+      const rows = parsedRows.get(hash) ?? JSON.parse(text);
       if (!Array.isArray(rows) || rows.some(r => r?.day !== day)) throw new Error('保存した履歴の日付が一致しません。');
       return rows;
     }))};
@@ -910,4 +932,4 @@ function createViewerDayStore({dbName = VD_DB} = {}) {
   return {inspect, writeDays, readRange, streamRange, readMetadata, readQuarantine, migrateLegacy, abandonMigration, syncParts, collect};
 }
 
-export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, readViewerHistory, createViewerDayStore};
+export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, viewerHistoryCovers, readViewerHistory, createViewerDayStore};

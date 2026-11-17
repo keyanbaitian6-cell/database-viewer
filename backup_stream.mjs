@@ -1,7 +1,8 @@
 // 改行の有無に依存せず、台・候補を1件ずつ解析する。画像入りの原文全体を保持しない。
 // 外枠には値の代わりにnullを置き、末尾までJSONとして検査してから結果を返す。
 // skipRecordValuesは保存済み内容からイベントだけを読む用途。入力ファイルの検査では使わない。
-export async function readBackupJson(stream, {known, validate, record = value => value, skipRecordValues = false} = {}) {
+// keepEnvelopeは、台・候補の中身を null に置き換えた外枠の原文（envelope）も返す（保存済み内容の要約用）。
+export async function readBackupJson(stream, {known, validate, record = value => value, skipRecordValues = false, keepEnvelope = false} = {}) {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
   const envelope = [], arrays = new Map(), keys = new Set();
   let depth = 0, quoted = false, escaped = false, keyText = null;
@@ -79,7 +80,7 @@ export async function readBackupJson(stream, {known, validate, record = value =>
       }
       (active ? pieces : envelope).push(value.slice(start));
     }
-    const doc = JSON.parse(envelope.join(''));
+    const envelopeText = envelope.join(''), doc = JSON.parse(envelopeText);
     validate?.(doc);
     for (const [name, values] of arrays) {
       if (!Array.isArray(doc[name]) || doc[name].length !== values.length || doc[name].some(v => v !== null)) {
@@ -87,7 +88,7 @@ export async function readBackupJson(stream, {known, validate, record = value =>
       }
       doc[name] = values;
     }
-    return {unchanged: !!known && doc.exported_at === known, document: doc};
+    return {unchanged: !!known && doc.exported_at === known, document: doc, ...(keepEnvelope ? {envelope: envelopeText} : {})};
   } catch (error) {
     try { await reader.cancel(); } catch { /* 元の解析エラーを返す。 */ }
     throw error;
