@@ -273,6 +273,53 @@ async function viewerHistoryCovers(url, site, bodyDays, cache = vpCache()) {
   for (const day of bodyDays) if (!have.has(day)) return false;
   return true;
 }
+// 段階B0（VIEWER_DAY_STORE.md、2026-11-18 利用者「既存で進めて」）：端末の本体と日別キャッシュ（Googleの部品）が、
+// 日ごとに同じ記録を持っているかを照合する。書き込みはしない。両方とも1件ずつ読み、日ごとに件数と、記録の全項目
+// （キーを並べ替えた正規化JSON）の指紋の和だけを持つ（並び順に依存しない。全件のオブジェクトは同時に持たない）。
+// 指紋は照合用の速い計算（暗号ではない）。readBody(each) は本体の記録を1件ずつ each に渡す（本体が無ければ false を返す）。normalize は表示前に
+// 両方へ同じく掛ける整え（閲覧ページの lighten）。記録は normalize で書き換えてよい（呼ぶたびに新しく解析した値）。
+function vpRowDigest(text) {
+  let a = 0x811c9dc5, b = 0x9747b28c;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 16777619);
+    b = Math.imul(b ^ c, 0x5bd1e995); b ^= b >>> 15;
+  }
+  return [a >>> 0, b >>> 0];
+}
+async function compareViewerHistory(url, site, readBody, normalize = row => row, cache = vpCache()) {
+  if (!cache.stream) return {status: 'unavailable'};
+  const tally = (map, row) => {
+    const day = row && typeof row === 'object' && typeof row.day === 'string' ? row.day : null;
+    if (!day) return false;
+    const [h1, h2] = vpRowDigest(vpCanonical(normalize(row)));
+    const t = map.get(day) || {count: 0, a: 0, b: 0};
+    t.count++; t.a = (t.a + h1) >>> 0; t.b = (t.b + h2) >>> 0;
+    map.set(day, t);
+    return true;
+  };
+  const body = new Map(), cached = new Map();
+  let bodyRecords = 0, bodySkipped = 0, cacheRecords = 0, header = false;
+  // 日別キャッシュを先に読む（無ければ本体を読まずに終える）。
+  for await (const value of cache.stream(vpEndpointKey(url, site))) {
+    if (value.header) { header = true; for (const day of value.days || []) cached.set(day, {count: 0, a: 0, b: 0}); continue; }
+    for (const text of Object.values(value.parts || {})) {
+      const rows = JSON.parse(text);
+      if (!Array.isArray(rows)) throw new Error('保存した履歴が破損しています。');
+      for (const row of rows) if (tally(cached, row)) cacheRecords++;
+    }
+  }
+  if (!header) return {status: 'no-cache'};
+  if (await readBody(row => { if (tally(body, row)) bodyRecords++; else bodySkipped++; }) === false) return {status: 'no-body'};
+  // 記録の無い日はどちらにあっても件数0として比べる（キャッシュの空の日・本体に出てこない日）。
+  const empty = {count: 0, a: 0, b: 0}, mismatched = [];
+  for (const day of [...new Set([...body.keys(), ...cached.keys()])].sort()) {
+    const x = body.get(day) || empty, y = cached.get(day) || empty;
+    if (x.count !== y.count || x.a !== y.a || x.b !== y.b) mismatched.push({day, body: x.count, cache: y.count});
+  }
+  return {status: mismatched.length ? 'mismatch' : 'match', bodyDays: body.size, bodyRecords, bodySkipped,
+    cacheDays: cached.size, cacheRecords, mismatchedDays: mismatched.length, examples: mismatched.slice(0, 3)};
+}
 async function vpClientHash(text) {
   const data = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(data)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -932,4 +979,4 @@ function createViewerDayStore({dbName = VD_DB} = {}) {
   return {inspect, writeDays, readRange, streamRange, readMetadata, readQuarantine, migrateLegacy, abandonMigration, syncParts, collect};
 }
 
-export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, viewerHistoryCovers, readViewerHistory, createViewerDayStore};
+export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, viewerHistoryCovers, compareViewerHistory, readViewerHistory, createViewerDayStore};

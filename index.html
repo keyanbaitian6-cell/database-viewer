@@ -384,6 +384,48 @@
         const diag = await import('./storage_report.mjs');
         return diag.driveHold();
       },
+      // 段階B0（VIEWER_DAY_STORE.md、2026-11-18）：端末の本体と日別キャッシュ（Googleの部品）が、日ごとに同じ記録を
+      // 持っているかを照合し、診断（「更新・差枚の取得状況」）に出す。読むだけで、本体・キャッシュ・表示は変えない。
+      // 本体は1件ずつ読み、全件のオブジェクトは作らない。照合の途中でページが終わっていたら、24時間は照合しない
+      // （Googleの更新・表示には関係しない）。メルヘンだけ。結果の状態（match など）を返す。照合しなければ null。
+      async checkDayCache() {
+        if (await pscubeActive()) return null;
+        let url = null;
+        try { url = localStorage.getItem('database-viewer-remote'); } catch { /* 読めなければ照合しない */ }
+        if (!url) return null;
+        const diag = await import('./storage_report.mjs');
+        if (diag.checkHold()) return null;
+        diag.phaseStarted('check');
+        let result;
+        try {
+          const parser = window.databaseBackupStream || await import('./backup_stream.mjs');
+          const {compareViewerHistory} = await import('./viewer_parts.mjs');
+          // 本体は、日別キャッシュがあると分かってから読む。
+          result = await compareViewerHistory(url, 'meruhen', async each => {
+            let text = await readStored();
+            if (!text) return false;
+            // 本体の文字列を1MiB文字ずつ渡す（Blob に丸ごと写すと、本体と同じ大きさの写しがもう1つできる）。
+            // 区切りでサロゲートペアを割らない。
+            const encoder = new TextEncoder(), CHUNK = 1 << 20;
+            let at = 0;
+            const stream = new ReadableStream({pull(controller) {
+              if (at >= text.length) { text = null; controller.close(); return; }
+              let end = Math.min(at + CHUNK, text.length);
+              const code = text.charCodeAt(end - 1);
+              if (end < text.length && code >= 0xD800 && code <= 0xDBFF) end--;
+              controller.enqueue(encoder.encode(text.slice(at, end)));
+              at = end;
+            }});
+            await parser.readBackupJson(stream, {record: row => { each(row); return null; }});
+          }, lighten);
+        } catch (error) {
+          result = {status: 'error', message: String(error?.message || error).slice(0, 200)};
+        } finally {
+          diag.phaseFinished('check');
+        }
+        diag.recordCheck(result);
+        return result.status;
+      },
       // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
       // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
       // （2026-10-29）。本体に前から入っている印も使う（Dart側で合わせる）。

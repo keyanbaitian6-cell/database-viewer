@@ -4,7 +4,9 @@
 // 分かった大きさだけを使う。読み込みの記録は localStorage の小さな1項目（DIAG_KEY）だけに書く。
 
 export const DIAG_KEY = 'database-viewer-diag';
-const PHASES = {open: '起動時の読み込み', drive: 'Googleドライブの更新'};
+const PHASES = {open: '起動時の読み込み', drive: 'Googleドライブの更新', check: '日別キャッシュと本体の照合'};
+// 照合（段階B0、2026-11-18）は、記録があるときだけ行を出す（P’s CUBEの閲覧ページなど、照合しないページに出さない）。
+const OPTIONAL = new Set(['check']);
 // このページが使う保存先。ほかの名前（同じ配信元の共有カレンダーなど）は名前だけ数える。
 const KNOWN = ['database-viewer', 'database-pscube-viewer', 'database-viewer-parts-v1', 'database-viewer-parts-pending-v1', 'database-viewer-days-v1'];
 
@@ -34,6 +36,8 @@ export function phaseStarted(phase, {storage = globalThis.localStorage, now = ()
     left.last_unfinished_at = log.running.at;
     // Googleドライブの更新の最中に終わっていたら、しばらく起動時の自動更新を止める印を残す（driveHold）。
     if (log.running.phase === 'drive') log.drive_halt = {at: log.running.at};
+    // 照合の最中に終わっていたら、しばらく照合だけを止める（checkHold。Googleの更新は止めない）。
+    if (log.running.phase === 'check') log.check_halt = {at: log.running.at};
   }
   log.running = {phase, at: now().toISOString()};
   writeLog(storage, log);
@@ -45,11 +49,32 @@ export const DRIVE_HOLD_MS = 6 * 60 * 60 * 1000;
 
 /** 起動時の自動更新を止めている間は、止めている期限（ISO）。止めていなければ null。 */
 export function driveHold({storage = globalThis.localStorage, now = () => new Date()} = {}) {
-  const started = Date.parse(readLog(storage).drive_halt?.at);
+  return holdUntil(readLog(storage).drive_halt, DRIVE_HOLD_MS, now);
+}
+
+function holdUntil(mark, span, now) {
+  const started = Date.parse(mark?.at);
   if (!Number.isFinite(started)) return null;
   const elapsed = now().getTime() - started;
   // 時計が大きく戻っていたときは、印を信じて止め続けない。
-  return elapsed < DRIVE_HOLD_MS && elapsed > -DRIVE_HOLD_MS ? new Date(started + DRIVE_HOLD_MS).toISOString() : null;
+  return elapsed < span && elapsed > -span ? new Date(started + span).toISOString() : null;
+}
+
+// 前回の照合が途中で終わっていたら、そこからこの時間は照合をしない（照合で落ち続けないように。表示・更新には関係しない）。
+export const CHECK_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/** 照合を止めている間は、止めている期限（ISO）。止めていなければ null。 */
+export function checkHold({storage = globalThis.localStorage, now = () => new Date()} = {}) {
+  return holdUntil(readLog(storage).check_halt, CHECK_HOLD_MS, now);
+}
+
+/** 照合の結果（compareViewerHistory の戻り値、または {status: 'error', message}）を控える。前の結果は置き換える。 */
+export function recordCheck(result, {storage = globalThis.localStorage, now = () => new Date()} = {}) {
+  const log = readLog(storage);
+  const pick = ({status, bodyDays, bodyRecords, bodySkipped, cacheDays, cacheRecords, mismatchedDays, examples, message}) =>
+    ({status, bodyDays, bodyRecords, bodySkipped, cacheDays, cacheRecords, mismatchedDays, examples, message});
+  log.check = {...pick(result || {status: 'error'}), at: now().toISOString()};
+  writeLog(storage, log);
 }
 
 /** 読み込みが終わったら（成功・失敗どちらでも）呼ぶ。始めていない区切りは数えない。 */
@@ -63,6 +88,7 @@ export function phaseFinished(phase, {storage = globalThis.localStorage, now = (
   p.max_ms = p.last_ms == null ? p.max_ms : Math.max(p.max_ms ?? 0, p.last_ms);
   p.last_at = end.toISOString();
   if (phase === 'drive') delete log.drive_halt; // 最後まで終わった（成功も、通信の失敗も）ので、自動更新を止める印は消す。
+  if (phase === 'check') delete log.check_halt;
   log.running = null;
   writeLog(storage, log);
 }
@@ -146,6 +172,19 @@ const count = n => Number(n).toLocaleString('ja-JP');
 const seconds = ms => `${(ms / 1000).toLocaleString('ja-JP', {maximumFractionDigits: 1})}秒`;
 const when = s => Number.isFinite(Date.parse(s)) ? new Date(s).toLocaleString('ja-JP') : '不明';
 
+const short = day => typeof day === 'string' ? day.slice(5).replace('-', '/') : '?';
+function checkLine(c) {
+  const at = `（${when(c.at)}）`;
+  if (c.status === 'match') return `日別キャッシュと本体：一致（${count(c.bodyDays)}日・${count(c.bodyRecords)}件）${at}`;
+  if (c.status === 'mismatch') {
+    const ex = (c.examples || []).map(e => `${short(e.day)} 本体${count(e.body)}件・キャッシュ${count(e.cache)}件`).join('、');
+    return `日別キャッシュと本体：一致しない日 ${count(c.mismatchedDays)}日（本体${count(c.bodyDays)}日・${count(c.bodyRecords)}件／キャッシュ${count(c.cacheDays)}日・${count(c.cacheRecords)}件。例：${ex}）${at}`;
+  }
+  if (c.status === 'no-cache') return `日別キャッシュと本体：日別キャッシュが無いので照合していません${at}`;
+  if (c.status === 'no-body') return `日別キャッシュと本体：本体が無いので照合していません${at}`;
+  return `日別キャッシュと本体：照合できませんでした（${c.message || c.status}）${at}`;
+}
+
 /** 画面（「更新・差枚の取得状況」）に出す行。 */
 export function storageReportLines(report) {
   const lines = ['この端末の保存（診断）：保存した内容は読み直さず、変えていません。'];
@@ -187,11 +226,14 @@ export function storageReportLines(report) {
   if (report.local_chars != null) lines.push(`小さな設定の保存（localStorage）：${count(report.local_chars)}文字`);
   for (const [phase, label] of Object.entries(PHASES)) {
     const p = report.log.phases[phase];
+    if (!p && OPTIONAL.has(phase)) continue;
     if (!p) { lines.push(`${label}：まだ記録がありません`); continue; }
     lines.push(`${label}：最後まで終わった${count(p.count)}回`
       + `${p.last_ms != null ? `・前回${seconds(p.last_ms)}` : ''}${p.max_ms != null ? `・最長${seconds(p.max_ms)}` : ''}`
       + `・途中で終わった${count(p.unfinished)}回${p.unfinished ? `（最後：${when(p.last_unfinished_at)}に始めた分）` : ''}`);
   }
+  const c = report.log.check;
+  if (c) lines.push(checkLine(c));
   if (report.log.running && Object.hasOwn(PHASES, report.log.running.phase)) {
     lines.push(`いま${PHASES[report.log.running.phase]}の途中です（${when(report.log.running.at)}から）`);
   }
