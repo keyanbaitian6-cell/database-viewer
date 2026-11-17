@@ -162,7 +162,53 @@ function vpCache() {
       };
     });
   }
-  return {get: key => run(key), commit: (key, value) => run(key, value, true), stream};
+  return {get: key => run(key), commit: (key, value) => run(key, value, true), stream, pending: vpPendingStore()};
+}
+// 読みかけの部品（2026-11-17 利用者「続きから読めるように」。初めて開く端末はP-STATIONだけで約35MBを8部品ずつ読み、
+// 途中で1回でも通信に失敗すると、それまでに読んだ分を捨てて最初から読み直していた）。
+// ・表示用の履歴（database-viewer-parts-v1）とは別の保存先に置く。既存の保存先の版を上げると、同じ配信元の古い版の
+//   ページ（閲覧ページ・共有カレンダー）が開けなくなるため。全部そろうまで表示用の履歴には入れない。
+// ・部品は中身のハッシュで呼ぶので、使う前に一覧のハッシュ・バイト数と照合する（古い中身・壊れた中身は使わない）。
+// ・全部そろって履歴に保存したら消す。一覧から外れた部品も、次に読むときに消す。
+// ・この保存先が使えなくても読み込みは止めない（今までどおり最初から読む）。
+function vpPendingStore() {
+  const NAME = 'database-viewer-parts-pending-v1', STORE = 'parts';
+  async function run(mode, work) {
+    if (!globalThis.indexedDB || !globalThis.IDBKeyRange) return null;
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(NAME, 1);
+      request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE); };
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('cache blocked'));
+      request.onsuccess = () => resolve(request.result);
+    });
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, mode), result = work(tx.objectStore(STORE));
+        tx.oncomplete = () => resolve(result);
+        tx.onabort = tx.onerror = () => reject(tx.error);
+      });
+    } finally { db.close(); }
+  }
+  const range = key => IDBKeyRange.bound(key + '|', key + '|￿');
+  return {
+    // 一覧（keep）にある読みかけを返し、一覧に無いものは消す。
+    async take(key, keep) {
+      return run('readwrite', store => {
+        const found = new Map(), request = store.openCursor(range(key));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return;
+          const hash = String(cursor.key).slice(key.length + 1);
+          if (keep.has(hash) && typeof cursor.value === 'string') found.set(hash, cursor.value); else cursor.delete();
+          cursor.continue();
+        };
+        return found;
+      });
+    },
+    async put(key, entries) { return run('readwrite', store => { for (const [hash, text] of entries) store.put(text, key + '|' + hash); }); },
+    async clear(key) { return run('readwrite', store => { store.delete(range(key)); }); },
+  };
 }
 function vpEndpointKey(url, site) { const endpoint = new URL(url); endpoint.search = ''; endpoint.hash = ''; return endpoint.href + '|' + site; }
 function vpCachedDays(cached) {
@@ -254,6 +300,18 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       vpRows(text, p); parts.set(p.hash, text);
     } else missing.push(p);
   }
+  // 前回の読み込みが途中で失敗していたら、読み終えていた部品を使う（一致を確かめたものだけ）。
+  const pending = cache.pending;
+  if (pending && missing.length) {
+    let saved = null;
+    try { saved = await pending.take(key, new Set(m.parts.map(p => p.hash))); } catch { /* 使えなければ最初から読む */ }
+    for (let i = missing.length - 1; saved && i >= 0; i--) {
+      const p = missing[i], text = saved.get(p.hash);
+      if (typeof text !== 'string' || new TextEncoder().encode(text).length !== p.bytes || await vpClientHash(text) !== p.hash) continue;
+      try { vpRows(text, p); } catch { continue; }
+      parts.set(p.hash, text); missing.splice(i, 1);
+    }
+  }
   for (let i = 0; i < missing.length; i += VP_BATCH) {
     const batch = missing.slice(i, i + VP_BATCH), request = new URL(endpoint);
     if (site === 'pscube') request.searchParams.set('file', 'pscube');
@@ -267,6 +325,10 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       if (item?.hash !== p.hash || typeof item.text !== 'string' || new TextEncoder().encode(item.text).length !== p.bytes ||
           await vpClientHash(item.text) !== p.hash) throw new Error('閲覧用の日別データが一致しません。');
       vpRows(item.text, p); parts.set(p.hash, item.text);
+    }
+    // 次の部品で失敗しても、ここまでの分は次の読み込みで使う（残りが無ければ保存しない）。
+    if (pending && i + VP_BATCH < missing.length) {
+      try { await pending.put(key, batch.map(p => [p.hash, parts.get(p.hash)])); } catch { /* 保存できなくても読み込みは続ける */ }
     }
   }
   const covered = m.version === 2 ? m.days : [...new Set(m.parts.map(p => p.day))];
@@ -311,8 +373,16 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   const previousDays = vpCachedDays(cached);
   const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
     cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));
-  try { await vpStoreHistory(cache, key, cached, changed, {...m.header, ...curveRefs, parts_at: m.header.exported_at}); }
-  catch (e) { throw new Error('履歴を端末に保存できませんでした。前の保存データは保持しています。空き容量とブラウザの保存設定を確認してください。'); }
+  const store = () => vpStoreHistory(cache, key, cached, changed, {...m.header, ...curveRefs, parts_at: m.header.exported_at});
+  try { await store(); }
+  catch (e) {
+    // 読みかけの分で容量が足りなかったときのため、読みかけを消してもう1回だけ保存する。
+    let retried = false;
+    if (pending) try { await pending.clear(key); await store(); retried = true; } catch { /* 下の知らせを出す */ }
+    if (!retried) throw new Error('履歴を端末に保存できませんでした。前の保存データは保持しています。空き容量とブラウザの保存設定を確認してください。');
+  }
+  // 全部そろって保存したので、読みかけは要らない。
+  if (pending) try { await pending.clear(key); } catch { /* 次に読むとき、一覧に無い分は消える */ }
   return doc;
 }
 // 1日分のグラフの線を読む（[通し番号, 線] の一覧）。refs は一覧の curve_parts のうちその日の分。

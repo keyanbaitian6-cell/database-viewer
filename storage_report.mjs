@@ -6,7 +6,7 @@
 export const DIAG_KEY = 'database-viewer-diag';
 const PHASES = {open: '起動時の読み込み', drive: 'Googleドライブの更新'};
 // このページが使う保存先。ほかの名前（同じ配信元の共有カレンダーなど）は名前だけ数える。
-const KNOWN = ['database-viewer', 'database-pscube-viewer', 'database-viewer-parts-v1', 'database-viewer-days-v1'];
+const KNOWN = ['database-viewer', 'database-pscube-viewer', 'database-viewer-parts-v1', 'database-viewer-parts-pending-v1', 'database-viewer-days-v1'];
 
 function readLog(storage) {
   try {
@@ -157,6 +157,11 @@ export function storageReportLines(report) {
     lines.push(parts
       ? `日別キャッシュ（Googleの部品）：${count(parts.stores['history-days'] ?? 0)}日分（接続先${count(parts.stores['history-heads'] ?? 0)}件・旧形式${count(parts.stores.snapshots ?? 0)}件）`
       : `日別キャッシュ（Googleの部品）：${report.failed.includes('database-viewer-parts-v1') ? '確認できませんでした' : 'なし'}`);
+    // 読みかけの部品（2026-11-17）：読み込みが途中で失敗したとき、次に続きから読むための一時置き場。そろったら消える。
+    const pending = at('database-viewer-parts-pending-v1');
+    if (pending || report.failed.includes('database-viewer-parts-pending-v1')) {
+      lines.push(`読みかけの部品（続きから読む分、そろったら消えます）：${pending ? `${count(pending.stores.parts ?? 0)}件` : '確認できませんでした'}`);
+    }
     const days = at('database-viewer-days-v1');
     lines.push(days
       ? `新しい日別保存：索引${count(days.stores.heads ?? 0)}件・本文${count(days.stores.bodies ?? 0)}件`
