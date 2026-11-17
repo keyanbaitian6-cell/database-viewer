@@ -320,6 +320,11 @@
         const diag = await import('./storage_report.mjs');
         (done ? diag.phaseFinished : diag.phaseStarted)(name);
       },
+      // 前回のGoogleドライブの更新が途中で終わっていたら、起動時の自動更新を止めている期限（ISO）。無ければ null。
+      async autoUpdateHold() {
+        const diag = await import('./storage_report.mjs');
+        return diag.driveHold();
+      },
       // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
       // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
       // （2026-10-29）。本体に前から入っている印も使う（Dart側で合わせる）。

@@ -32,9 +32,24 @@ export function phaseStarted(phase, {storage = globalThis.localStorage, now = ()
     const left = phaseOf(log, log.running.phase);
     left.unfinished++;
     left.last_unfinished_at = log.running.at;
+    // Googleドライブの更新の最中に終わっていたら、しばらく起動時の自動更新を止める印を残す（driveHold）。
+    if (log.running.phase === 'drive') log.drive_halt = {at: log.running.at};
   }
   log.running = {phase, at: now().toISOString()};
   writeLog(storage, log);
+}
+
+// 前回のGoogleドライブの更新が途中で終わっていたら、そこからこの時間は起動時の自動更新をしない
+// （2026-11-18：更新のたびにSafariが落ちて、ページが開けなくなった。手動の更新ボタンはいつでも使える）。
+export const DRIVE_HOLD_MS = 6 * 60 * 60 * 1000;
+
+/** 起動時の自動更新を止めている間は、止めている期限（ISO）。止めていなければ null。 */
+export function driveHold({storage = globalThis.localStorage, now = () => new Date()} = {}) {
+  const started = Date.parse(readLog(storage).drive_halt?.at);
+  if (!Number.isFinite(started)) return null;
+  const elapsed = now().getTime() - started;
+  // 時計が大きく戻っていたときは、印を信じて止め続けない。
+  return elapsed < DRIVE_HOLD_MS && elapsed > -DRIVE_HOLD_MS ? new Date(started + DRIVE_HOLD_MS).toISOString() : null;
 }
 
 /** 読み込みが終わったら（成功・失敗どちらでも）呼ぶ。始めていない区切りは数えない。 */
@@ -47,6 +62,7 @@ export function phaseFinished(phase, {storage = globalThis.localStorage, now = (
   p.last_ms = Number.isFinite(ms) ? ms : null;
   p.max_ms = p.last_ms == null ? p.max_ms : Math.max(p.max_ms ?? 0, p.last_ms);
   p.last_at = end.toISOString();
+  if (phase === 'drive') delete log.drive_halt; // 最後まで終わった（成功も、通信の失敗も）ので、自動更新を止める印は消す。
   log.running = null;
   writeLog(storage, log);
 }
