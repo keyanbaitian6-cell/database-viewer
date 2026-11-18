@@ -42,6 +42,38 @@
     // 先に成功した方を使う。404・429・5xx・通信失敗も、少し待って次を出す（最大4本）。
     // 部品は drive_fetch.mjs（P’s CUBEの閲覧ページと共通）。
 
+    // 段階B1・B2の照合（読むだけ）：日別キャッシュを古い日から1日ずつ onDay(日, その日の記録のJSON) に渡し、全部渡したら
+    // finish() の返事（照合結果のJSON）を診断に控える。メルヘンだけ。途中でページが終わっていたら、その照合だけ24時間止める。
+    // この接続先の日別キャッシュ（Googleの部品で更新してきた印）があるか。見出しだけを読む。
+    async function hasDayHistory(url) {
+      try {
+        const {viewerHistoryExists} = await import('./viewer_parts.mjs');
+        return await viewerHistoryExists(url, 'meruhen');
+      } catch { return false; }
+    }
+
+    async function dayCheck(phase, held, record, onDay, finish, from = null) {
+      if (await pscubeActive()) return null;
+      let url = null;
+      try { url = localStorage.getItem('database-viewer-remote'); } catch { /* 読めなければ照合しない */ }
+      if (!url) return null;
+      const diag = await import('./storage_report.mjs');
+      if (held(diag)) return null;
+      diag.phaseStarted(phase);
+      let result;
+      try {
+        const {readViewerDays} = await import('./viewer_parts.mjs');
+        const read = await readViewerDays(url, 'meruhen', (day, rows) => onDay(day, JSON.stringify(rows)), lighten, undefined, from);
+        result = read.status === 'ok' ? {...read, ...JSON.parse(finish())} : read;
+      } catch (error) {
+        result = {status: 'error', message: String(error?.message || error).slice(0, 200)};
+      } finally {
+        diag.phaseFinished(phase);
+      }
+      record(diag, result);
+      return result.status;
+    }
+
     function lighten(record) {
       const graph = record && record.graph_measurement;
       if (graph && typeof graph === 'object') {
@@ -261,7 +293,15 @@
               full = {document: doc};
             } else if (checked.stream) full = { response: checked.response, stream: checked.stream };
             else if (!checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
-            else {
+            else if (await hasDayHistory(url)) {
+              // 2026-11-19：Googleのスクリプトは、PCの書き出しが新しくなってから日別の部品を作り直すまでの間、
+              // 部品を付けずに目印だけを返す。そのときファイル全体（グラフの線入り）を読むと、更新が重く、本体だけが
+              // 線入りの形になり日別キャッシュと食い違った（11/19 1:31。11/18 0:27の落ちも同じ時間帯）。
+              // 日別キャッシュを持つ端末（部品で更新してきた端末）は、ファイル全体を読まずに今回の更新を見送る。
+              // （画面には「Googleドライブから読めませんでした（前に読み込んだ内容を表示しています）。」に続けて出る。）
+              throw new Error('Google側で閲覧用の日別の部品を作り直しているところです（PCの書き出しの直後）。'
+                + '少し待ってから更新してください。');
+            } else {
               const response = await hedgedFetch(url, options);
               if (!response.ok) throw Object.assign(new Error('http'), { status: response.status });
               full = { response, stream: response.body };
@@ -334,16 +374,28 @@
         // Dartで検査・組み立て済みのメルヘンJSONは、保存のために全文を解析し直さない。
         const pscube = !meruhen && JSON.parse(text).format === 'pscube-viewer';
         if (pscube) await (await pscubeBridge()).save(text);
-        const db = await open();
+        // 保存に失敗したら、その種類（保存先が返したエラー名・中断の別・画面が裏だったか）を診断に控える
+        // （2026-11-18：iPhoneで「端末に保存できませんでした」が出たが、原因の手がかりが残っていなかった）。保存の動きは変えない。
+        let stage = 'open', event = null;
         try {
-          await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, 'readwrite');
-            if (!pscube) tx.objectStore(STORE).put(text, 'data');
-            tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
-            tx.oncomplete = resolve;
-            tx.onerror = tx.onabort = () => reject(tx.error || new Error('端末に保存できませんでした。'));
-          });
-        } finally { db.close(); }
+          const db = await open();
+          stage = 'write';
+          try {
+            await new Promise((resolve, reject) => {
+              const tx = db.transaction(STORE, 'readwrite');
+              if (!pscube) tx.objectStore(STORE).put(text, 'data');
+              tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
+              tx.oncomplete = resolve;
+              tx.onerror = tx.onabort = e => { event = e?.type || null; reject(tx.error || new Error('端末に保存できませんでした。')); };
+            });
+          } finally { db.close(); }
+        } catch (error) {
+          try {
+            (await import('./storage_report.mjs')).recordSaveFailure({stage, event, name: error?.name, message: error?.message,
+              chars: pscube ? null : text.length, hidden: document.visibilityState === 'hidden'});
+          } catch (_) { /* 診断を控えられなくても、元の失敗を返す */ }
+          throw error;
+        }
         remember(text, pscube ? 'pscube' : 'meruhen');
       },
       async load() {
@@ -425,6 +477,19 @@
         }
         diag.recordCheck(result);
         return result.status;
+      },
+      // 段階B1（VIEWER_DAY_STORE.md、2026-11-18）：カレンダーの日ごとの差枚を、日別キャッシュから1日ずつ計算し、
+      // 今の計算（全記録から）と照合して診断に出す。onDay(日, その日の記録のJSON) を1日ずつ呼び、全日の記録は
+      // 同時に持たない。finish() は照合の結果のJSON（{status, days, cells, mismatched, examples}）を返す。
+      // 読むだけで、本体・キャッシュ・表示は変えない。途中でページが終わっていたら24時間は照合しない。メルヘンだけ。
+      async checkCalendar(onDay, finish) {
+        return dayCheck('calendar', diag => diag.calendarHold(), (diag, r) => diag.recordCalendar(r), onDay, finish);
+      },
+      // 段階B2（VIEWER_DAY_STORE.md、2026-11-18）：日・機種一覧に出す台の点数を、日別キャッシュの「その日と前30暦日」
+      // だけから計算し、今の計算と1台ずつ照合して診断に出す。形は checkCalendar と同じ（日別キャッシュを古い日から1日ずつ渡す）。
+      // from より前の日は読まない（採点の対象の日と前30日だけ）。
+      async checkScores(onDay, finish, from = null) {
+        return dayCheck('scores', diag => diag.scoresHold(), (diag, r) => diag.recordScores(r), onDay, finish, from);
       },
       // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
       // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
