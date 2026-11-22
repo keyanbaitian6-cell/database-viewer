@@ -389,6 +389,10 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
   const parts = new Map(), missing = [];
   // 中身の一致を確かめ終えた部品（ハッシュ）と、その行。同じ部品を何度も計算・解析しない（更新1回のメモリの山を下げる、2026-11-18）。
   const verified = new Set(), parsedRows = new Map();
+  // 端末の保存分ではなく、Google（または前回の読みかけ）から取り直した部品。端末の同じハッシュの本文が壊れていた日は、
+  // 部品の顔ぶれ（ハッシュの一覧）が変わらないので、これで書き直す日に入れる（2026-11-22、Codexの点検 #4。以前は
+  // 画面には直った内容が出るのに端末は壊れたままで、次にオフラインで開くと「破損」で止まった）。
+  const fetched = new Set();
   for (const p of m.parts) {
     const text = cached?.parts?.[p.hash];
     // 端末内の欠損・破損も、当該パーツだけ再取得する。
@@ -406,7 +410,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       if (typeof text !== 'string' || new TextEncoder().encode(text).length !== p.bytes || await vpClientHash(text) !== p.hash) continue;
       let rows;
       try { rows = vpRows(text, p); } catch { continue; }
-      parsedRows.set(p.hash, rows); verified.add(p.hash); parts.set(p.hash, text); missing.splice(i, 1);
+      parsedRows.set(p.hash, rows); verified.add(p.hash); parts.set(p.hash, text); fetched.add(p.hash); missing.splice(i, 1);
     }
   }
   for (let i = 0; i < missing.length; i += VP_BATCH) {
@@ -421,7 +425,7 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
       const p = batch[j], item = result.parts[j];
       if (item?.hash !== p.hash || typeof item.text !== 'string' || new TextEncoder().encode(item.text).length !== p.bytes ||
           await vpClientHash(item.text) !== p.hash) throw new Error('閲覧用の日別データが一致しません。');
-      parsedRows.set(p.hash, vpRows(item.text, p)); verified.add(p.hash); parts.set(p.hash, item.text);
+      parsedRows.set(p.hash, vpRows(item.text, p)); verified.add(p.hash); parts.set(p.hash, item.text); fetched.add(p.hash);
     }
     // 次の部品で失敗しても、ここまでの分は次の読み込みで使う（残りが無ければ保存しない）。
     if (pending && i + VP_BATCH < missing.length) {
@@ -471,7 +475,8 @@ async function fetchViewerParts(url, site, manifest, getJson, cache = vpCache())
     }))};
   const previousDays = vpCachedDays(cached);
   const changed = Object.fromEntries(Object.entries(updates).filter(([day, value]) =>
-    cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',')));
+    cached?.missingDays?.includes(day) || Object.keys(previousDays.get(day) || {}).sort().join(',') !== Object.keys(value).sort().join(',') ||
+    Object.keys(value).some(hash => fetched.has(hash))));
   const store = () => vpStoreHistory(cache, key, cached, changed, {...m.header, ...curveRefs, parts_at: m.header.exported_at});
   try { await store(); }
   catch (e) {
