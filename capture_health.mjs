@@ -176,7 +176,7 @@ export function makeSyncWrite(source, at, records, driveAt) {
 export function updateStatusLines(status, {exportedAt,loadedAt,checkedAt} = {}) {
   const value=validateSyncStatus(status);
   const when=s=>ndTime(s) ? new Date(s).toLocaleString('ja-JP') : '未確認';
-  const storeName=s=>({nagamachiminami:'長町南',saiwaichou:'幸町'})[s.store] || `${/^c\d+$/.test(s.store) ? 'P’s CUBE' : s.store}${s.rate==null ? '' : '（'+s.rate+'スロ）'}`;
+  const storeName=s=>({nagamachiminami:'長町南',saiwaichou:'幸町'})[s.store] || `${/^c\d+$/.test(s.store) ? 'P-STATION' : s.store}${s.rate==null ? '' : '（'+s.rate+'スロ）'}`;
   const lines=(value?.writes || []).flatMap(w=>[
     `${({pc:'PC',android:'Android',browser:'iPhone・ブラウザ'})[w.source]}の書き出し：${when(w.at)}／Driveファイルの更新：${when(w.drive_at)}`,
     ...w.stores.map(s=>`この出力の最新日：${storeName(s)} ${s.day}・${s.count}台`)]);

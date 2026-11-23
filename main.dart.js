@@ -8594,7 +8594,7 @@ m=J.aI(n)
 l=A.ag(["nagamachiminami","\u9577\u753a\u5357","saiwaichou","\u5e78\u753a"],r,r).h(0,m.h(n,i))
 if(l==null){l=A.aA("^c\\d+$",!1)
 k=A.al(m.h(n,i))
-l=l.b.test(k)?"P\u2019s CUBE":m.h(n,i)}l=A.m(l)
+l=l.b.test(k)?"P-STATION":m.h(n,i)}l=A.m(l)
 k=m.h(n,"rate")==null?"":"\uff08"+A.m(m.h(n,"rate"))+"\u30b9\u30ed\uff09"
 o.push("\u3053\u306e\u51fa\u529b\u306e\u6700\u65b0\u65e5\uff1a"+l+k+" "+A.m(m.h(n,"day"))+"\u30fb"+A.m(m.h(n,"count"))+"\u53f0")}B.b.H(d,o)}if(d.length===0)d.push("\u5143\u30d5\u30a1\u30a4\u30eb\u306e\u66f8\u304d\u51fa\u3057\uff1a\u672a\u78ba\u8a8d")
 b=c?j:g.h(0,"processor_release")
@@ -8634,7 +8634,7 @@ i=A.o(j,j)
 for(j=g.length,q=0;q<g.length;g.length===j||(0,A.l)(g),++q){p=g[q]
 o=A.aA("^c\\d+$",!1)
 n=A.m(p.h(0,"store"))
-o=o.b.test(n)?"P\u2019s CUBE":A.lJ(A.m(p.h(0,"store")))
+o=o.b.test(n)?"P-STATION":A.lJ(A.m(p.h(0,"store")))
 m=o+(p.h(0,"rate")==null?"":"\u30fb"+A.m(p.h(0,"rate"))+"\u30b9\u30ed")
 l=A.m(p.h(0,"day"))
 if(i.a7(m)){o=i.h(0,m)
@@ -10572,7 +10572,7 @@ o.push(B.c.T(p,r<0?0:r,s))}if(a>0)q="+"
 else q=a<0?"-":""
 return q+new A.c5(o,t.Rr).aW(0,",")},
 lJ(a){var s=A.aA("^pscube:c\\d+:\\d+(?:\\.\\d+)?$",!1)
-if(s.b.test(a))return"P\u2019s CUBE\uff08"+a.split(":")[2]+"\u30b9\u30ed\uff09"
+if(s.b.test(a))return"P-STATION\uff08"+a.split(":")[2]+"\u30b9\u30ed\uff09"
 s=B.cP.h(0,a)
 return s==null?a:s},
 aMA(a){var s,r,q,p,o=new A.V(a,new A.aMB(),A.I(a).i("V<1,h>")).d4(0),n=t.N
@@ -56435,7 +56435,7 @@ anB(a){var s,r,q,p,o=a.x,n=o==null?"":A.aWV(o)+"\u66f8\u304d\u51fa\u3057\u30fb",
 A:{if("android"===m){s="Android\u7248"
 break A}if("pc"===m||"pc-deleted"===m){s="PC\u7248"
 break A}if("pc-viewer"===m){s="PC\u7248\uff08\u95b2\u89a7\u7528\u30fb\u76f4\u8fd160\u65e5\uff09"
-break A}if("pscube"===m){s="P\u2019s CUBE\u30fb"
+break A}if("pscube"===m){s="P-STATION\u30fb"
 break A}s=""
 break A}if(a.r==="Google\u30c9\u30e9\u30a4\u30d6\uff08\u81ea\u52d5\uff09"){r=a.at
 q=r>0?"\uff08\u3046\u3061"+r+"\u53f0\u306f\u524d\u306b\u8aad\u307f\u8fbc\u3093\u3060\u53e4\u3044\u65e5\u306e\u8a18\u9332\uff09":""
