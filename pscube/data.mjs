@@ -346,7 +346,8 @@ export function cleanEventName(name) {
   if (typeof name !== 'string') fail('イベント名が不正です。');
   const text = name.trim();
   if (!text) return null;
-  if (text.length > DATE_EVENT_MAX || /[\u0000-\u001f\u007f]/.test(text)) fail(`イベント名は1〜${DATE_EVENT_MAX}文字で入力してください。`);
+  // 文字数は PC（Python の len）と同じく1字ずつ数える（🌈 などの絵文字も1字。length では2。2026-11-22、Codexの点検 #12）。
+  if ([...text].length > DATE_EVENT_MAX || /[\u0000-\u001f\u007f]/.test(text)) fail(`イベント名は1〜${DATE_EVENT_MAX}文字で入力してください。`);
   return text;
 }
 /** 同じ店舗・貸玉・日付は、更新時刻が新しい方（同じなら後から来た方）を残す。 */

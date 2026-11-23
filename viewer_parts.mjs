@@ -281,6 +281,16 @@ async function viewerHistoryExists(url, site, cache = vpCache()) {
   } catch { return false; }
   return false;
 }
+// 部品（fetchViewerParts）で更新してきた端末か：日別キャッシュの見出しに parts_at（部品の一覧の時刻）がある。
+// rememberViewerHistory で全文から移しただけの見出しには無い（P’s CUBE版は読む前にいつも移すので、日別キャッシュが
+// あるだけでは部品を使っていたとは言えない）。読めないときは false。2026-11-22。
+async function viewerPartsHistory(url, site, cache = vpCache()) {
+  if (!cache.stream) return false;
+  try {
+    for await (const value of cache.stream(vpEndpointKey(url, site))) return !!value.header?.parts_at;
+  } catch { return false; }
+  return false;
+}
 // 段階B0（VIEWER_DAY_STORE.md、2026-11-18 利用者「既存で進めて」）：端末の本体と日別キャッシュ（Googleの部品）が、
 // 日ごとに同じ記録を持っているかを照合する。書き込みはしない。両方とも1件ずつ読み、日ごとに件数と、記録の全項目
 // （キーを並べ替えた正規化JSON）の指紋の和だけを持つ（並び順に依存しない。全件のオブジェクトは同時に持たない）。
@@ -507,6 +517,8 @@ async function fetchViewerCurves(url, site, refs, getJson) {
   }
   return rows;
 }
+// 部品を作り直す前の更新を見送るときの文（閲覧ページ web/index.html・P’s CUBE版 sync.mjs・共有カレンダーで同じ）。
+const VP_PARTS_PENDING = 'Google側で閲覧用の日別の部品を作り直しているところです（PCの書き出しの直後）。少し待ってから更新してください。';
 async function fetchViewerDocument(url, site, getJson, cache) {
   const check = new URL(url); check.searchParams.set('check', '1');
   if (site === 'meruhen') check.searchParams.set('access', '1');
@@ -514,6 +526,12 @@ async function fetchViewerDocument(url, site, getJson, cache) {
   for (let attempt = 0; ; attempt++) {
     const doc = await getJson(check.href);
     if (doc?.format !== 'drive-check') return doc; // 古いスクリプトが全文を返す。
+    // Googleが日別の部品を作り直す前（PCの書き出しの直後、部品の無い目印だけの返事）に、部品で更新してきた端末が
+    // ファイル全体を読むと重く、日別キャッシュと形も食い違う。閲覧ページ（web/index.html の fromRemote）と同じく、
+    // 日別キャッシュを持つ端末は今回の更新を見送る（2026-11-22、Geminiの点検 M-5②。共有カレンダーが使う）。
+    if (!doc.parts && globalThis.crypto?.subtle && await viewerPartsHistory(url, site, cache || undefined)) {
+      throw new Error(VP_PARTS_PENDING);
+    }
     if (!doc.parts || !globalThis.crypto?.subtle) return getJson(url);
     try { return await fetchViewerParts(url, site, doc.parts, getJson, cache); }
     catch (error) { if (attempt) throw error; }
@@ -1014,4 +1032,4 @@ function createViewerDayStore({dbName = VD_DB} = {}) {
   return {inspect, writeDays, readRange, streamRange, readMetadata, readQuarantine, migrateLegacy, abandonMigration, syncParts, collect};
 }
 
-export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, viewerHistoryCovers, viewerHistoryExists, compareViewerHistory, readViewerDays, readViewerHistory, createViewerDayStore};
+export {fetchViewerParts, fetchViewerDocument, fetchViewerCurves, rememberViewerHistory, viewerHistoryCovers, viewerHistoryExists, compareViewerHistory, readViewerDays, readViewerHistory, createViewerDayStore, viewerPartsHistory, VP_PARTS_PENDING};

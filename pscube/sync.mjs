@@ -1,7 +1,7 @@
 // P’s CUBE のバックアップ書き出しとGoogleドライブの自動読み込み（仕様：database/PSCUBE_SYNC.md）。
 // ドライブの読み込みは、メルヘンの閲覧ページと同じGoogle Apps ScriptのURLに ?file=pscube を付けて使う。
 import { validateData, recordKey } from './data.mjs';
-import {fetchViewerParts} from '../viewer_parts.mjs';
+import {fetchViewerParts, viewerPartsHistory, VP_PARTS_PENDING} from '../viewer_parts.mjs';
 import { DRIVE_RETRY_DELAYS_MS, HEDGE_AFTER_MS, checkVersion, hedgedFetch, isUnchanged, versionStore } from '../drive_fetch.mjs';
 
 export const REMOTE_KEY = 'database-viewer-remote';   // メルヘンの閲覧ページと同じ（同じブラウザで共有）
@@ -74,6 +74,7 @@ export async function fetchDrive(base, known, {
   const options = { fetchImpl, signal: controller.signal, hedgeMs, retryDelays, onLaunch: wait };
   const timedOut = () => new Error('Googleドライブの応答がありません（時間切れ）。');
   const explain = error => {
+    if (error?.partsPending) return error;   // 部品を作り直す前の見送り（下）。文をそのまま出す
     if (error?.name === 'AbortError' || controller.signal.aborted) return timedOut();
     if (error?.status) return new Error(`Googleドライブから読めませんでした（${error.status}）。`);
     return new Error('Googleドライブに接続できません。');
@@ -93,6 +94,11 @@ export async function fetchDrive(base, known, {
         }));
       } else if (checked.stream) text = await new Response(checked.stream).text();
       else if (checked.response && !checked.response.ok) throw Object.assign(new Error('http'), { status: checked.response.status });
+      // Googleが日別の部品を作り直す前（目印だけの返事）に、部品で更新してきた端末がファイル全体を読まない
+      // （閲覧ページのメルヘン版 web/index.html と同じ。2026-11-22、Geminiの点検 M-5②）。今回の更新は見送る。
+      else if (globalThis.crypto?.subtle && await viewerPartsHistory(url, 'pscube')) {
+        throw Object.assign(new Error(VP_PARTS_PENDING), {partsPending: true});
+      }
       if (text === undefined) {
         const response = await hedgedFetch(url, options);
         if (!response.ok) throw Object.assign(new Error('http'), { status: response.status });
