@@ -4,9 +4,9 @@
 // 分かった大きさだけを使う。読み込みの記録は localStorage の小さな1項目（DIAG_KEY）だけに書く。
 
 export const DIAG_KEY = 'database-viewer-diag';
-const PHASES = {open: '起動時の読み込み', drive: 'Googleドライブの更新', check: '日別キャッシュと本体の照合', calendar: 'カレンダーの日別計算と照合', scores: '日・機種一覧の日別採点と照合'};
+const PHASES = {open: '起動時の読み込み', drive: 'Googleドライブの更新', check: '日別キャッシュと本体の照合', calendar: 'カレンダーの日別計算と照合', scores: '日・機種一覧の日別採点と照合', trend: '台の推移の日別計算と照合'};
 // 照合（段階B0・B1、2026-11-18）は、記録があるときだけ行を出す（P’s CUBEの閲覧ページなど、照合しないページに出さない）。
-const OPTIONAL = new Set(['check', 'calendar', 'scores']);
+const OPTIONAL = new Set(['check', 'calendar', 'scores', 'trend']);
 // このページが使う保存先。ほかの名前（同じ配信元の共有カレンダーなど）は名前だけ数える。
 const KNOWN = ['database-viewer', 'database-pscube-viewer', 'database-viewer-parts-v1', 'database-viewer-parts-pending-v1', 'database-viewer-days-v1'];
 
@@ -42,6 +42,8 @@ export function phaseStarted(phase, {storage = globalThis.localStorage, now = ()
     if (log.running.phase === 'calendar') log.calendar_halt = {at: log.running.at};
     // 日・機種一覧の採点の照合（段階B2）も同じ（scoresHold）。
     if (log.running.phase === 'scores') log.scores_halt = {at: log.running.at};
+    // 台の推移の照合（段階B3）も同じ（trendHold）。
+    if (log.running.phase === 'trend') log.trend_halt = {at: log.running.at};
   }
   log.running = {phase, at: now().toISOString()};
   writeLog(storage, log);
@@ -92,8 +94,8 @@ export function calendarHold({storage = globalThis.localStorage, now = () => new
 /** カレンダーの日別計算の照合結果（{status, days, records, cells, mismatched, examples, message}）を控える。前の結果は置き換える。 */
 export function recordCalendar(result, {storage = globalThis.localStorage, now = () => new Date()} = {}) {
   const log = readLog(storage);
-  const pick = ({status, days, records, cells, mismatched, examples, message}) =>
-    ({status, days, records, cells, mismatched, examples, message});
+  const pick = ({status, days, records, cells, mismatched, examples, message, switched}) =>
+    ({status, days, records, cells, mismatched, examples, message, switched: switched === true || undefined});
   log.calendar = {...pick(result || {status: 'error'}), at: now().toISOString()};
   writeLog(storage, log);
 }
@@ -112,6 +114,23 @@ export function recordScores(result, {storage = globalThis.localStorage, now = (
   const pick = ({status, days, records, store, targets, racks, mismatched, examples, message}) =>
     ({status, days, records, store, targets: Array.isArray(targets) ? targets.slice(0, 10) : undefined, racks, mismatched, examples, message});
   log.scores = {...pick(result || {status: 'error'}), at: now().toISOString()};
+  writeLog(storage, log);
+}
+
+// 台の推移の照合（段階B3）も、途中で終わっていたらこの時間は止める。
+export const TREND_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/** 台の推移の照合を止めている間は、止めている期限（ISO）。止めていなければ null。 */
+export function trendHold({storage = globalThis.localStorage, now = () => new Date()} = {}) {
+  return holdUntil(readLog(storage).trend_halt, TREND_HOLD_MS, now);
+}
+
+/** 台の推移の照合結果（{status, days, records, store, day, racks, entries, mismatched, examples, message}）を控える。前の結果は置き換える。 */
+export function recordTrend(result, {storage = globalThis.localStorage, now = () => new Date()} = {}) {
+  const log = readLog(storage);
+  const pick = ({status, days, records, store, day, racks, entries, mismatched, examples, message}) =>
+    ({status, days, records, store, day, racks, entries, mismatched, examples, message});
+  log.trend = {...pick(result || {status: 'error'}), at: now().toISOString()};
   writeLog(storage, log);
 }
 
@@ -143,6 +162,7 @@ export function phaseFinished(phase, {storage = globalThis.localStorage, now = (
   if (phase === 'check') delete log.check_halt;
   if (phase === 'calendar') delete log.calendar_halt;
   if (phase === 'scores') delete log.scores_halt;
+  if (phase === 'trend') delete log.trend_halt;
   log.running = null;
   writeLog(storage, log);
 }
@@ -242,7 +262,7 @@ function checkLine(c) {
 
 function calendarLine(c) {
   const at = `（${when(c.at)}）`;
-  if (c.status === 'match') return `カレンダーの日別計算：一致（${count(c.days)}日・${count(c.cells)}マス）${at}`;
+  if (c.status === 'match') return `カレンダーの日別計算：一致（${count(c.days)}日・${count(c.cells)}マス）${c.switched ? '・カレンダーはこの表で表示' : ''}${at}`;
   if (c.status === 'mismatch') {
     const ex = (c.examples || []).map(e => `${e.store} ${short(e.day)} 今の計算${e.old}・日別${e.next}`).join('、');
     return `カレンダーの日別計算：一致しないマス ${count(c.mismatched)}件（${count(c.days)}日・${count(c.cells)}マス。例：${ex}）${at}`;
@@ -262,6 +282,18 @@ function scoresLine(c) {
   }
   if (c.status === 'no-cache') return `日・機種一覧の日別採点：日別キャッシュが無いので照合していません${at}`;
   return `日・機種一覧の日別採点：照合できませんでした（${c.message || c.status}）${at}`;
+}
+
+function trendLine(c) {
+  const at = `（${when(c.at)}）`;
+  const on = `${c.store ? `${STORE_NAMES[c.store] || c.store}・` : ''}${c.day ? `${short(c.day)}・` : ''}${count(c.racks)}台`;
+  if (c.status === 'match') return `台の推移の日別計算：一致（${on}・${count(c.entries)}行）${at}`;
+  if (c.status === 'mismatch') {
+    const ex = (c.examples || []).map(e => `${e.store} ${short(e.day)} ${e.machine} ${e.rack}番 今の計算［${e.old}］・日別［${e.next}］`).join('、');
+    return `台の推移の日別計算：一致しない台 ${count(c.mismatched)}件（${on}。例：${ex}）${at}`;
+  }
+  if (c.status === 'no-cache') return `台の推移の日別計算：日別キャッシュが無いので照合していません${at}`;
+  return `台の推移の日別計算：照合できませんでした（${c.message || c.status}）${at}`;
 }
 
 /** 画面（「更新・差枚の取得状況」）に出す行。 */
@@ -317,6 +349,8 @@ export function storageReportLines(report) {
   if (cal) lines.push(calendarLine(cal));
   const sc = report.log.scores;
   if (sc) lines.push(scoresLine(sc));
+  const tr = report.log.trend;
+  if (tr) lines.push(trendLine(tr));
   const f = report.log.save_fail;
   if (f) {
     const where = f.stage === 'open' ? '保存先を開けない' : f.event === 'abort' ? '書き込みの途中で中断' : '書き込みのエラー';

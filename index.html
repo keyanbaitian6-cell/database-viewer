@@ -491,6 +491,11 @@
       async checkScores(onDay, finish, from = null) {
         return dayCheck('scores', diag => diag.scoresHold(), (diag, r) => diag.recordScores(r), onDay, finish, from);
       },
+      // 段階B3（VIEWER_DAY_STORE.md、2026-11-25）：台の推移（直近7記録と各日の点数）を、日別キャッシュ（全日。推移は期間を
+      // 区切らない）から作り、今の計算と照合して診断に出す。形は checkCalendar と同じ。読むだけで表示は変えない。
+      async checkTrend(onDay, finish) {
+        return dayCheck('trend', diag => diag.trendHold(), (diag, r) => diag.recordTrend(r), onDay, finish);
+      },
       // 🌈の印（RAINBOW.md「iPhoneから付ける」）は本体（'data'、数十MB）と別の 'rainbow_marks' に置く。
       // 付け外し・共有の取り込みのたびに本体をまるごと読み書きすると、iPhoneのメモリが足りず落ちた
       // （2026-10-29）。本体に前から入っている印も使う（Dart側で合わせる）。
