@@ -157,6 +157,22 @@
         });
       } finally { db.close(); }
     }
+    // 本体の版の目印（2026-11-26 点検④）。本体（'data'）を保存するたびに同じ書き込みで新しい目印（'data_id'）を書き、
+    // 読むときは同じ読み出しで本体と目印を一緒に読む。段階B1の差枚表は、照合した本体の目印と一緒に控え、目印が
+    // 合うときだけ使う（書き出しの時刻と件数が同じ別の本体を取り違えない）。目印の無い古い本体は表を使わない。
+    let loadedId = null;
+    const newBodyId = () => (globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)));
+    async function readStoredWithId() {
+      const db = await open();
+      try {
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE), store = tx.objectStore(STORE);
+          const text = store.get('data'), id = store.get('data_id');
+          tx.oncomplete = () => resolve({text: text.result ?? null, id: typeof id.result === 'string' ? id.result : null});
+          tx.onerror = tx.onabort = () => reject(tx.error || text.error || id.error);
+        });
+      } finally { db.close(); }
+    }
     // 端末の旧本文の日がすべて日別キャッシュ（Googleの部品）にあるか。旧本文は1件ずつ読み、日だけを控える（全件の
     // オブジェクトは作らない）。確かめられなければ false（今までどおり、旧本文を解析して引き継ぐ）。
     async function storedHistoryCovered(url, covers) {
@@ -370,20 +386,23 @@
           else localStorage.removeItem('database-viewer-remote');
         } catch (_) {}
       },
-      async save(text, meruhen = false) {
+      // メルヘンの本体を保存したら、その本体の目印を返す（[keepId] を渡すと、その目印のまま。記録を変えないイベントだけの
+      // 保存で使う）。P’s CUBEは null。
+      async save(text, meruhen = false, keepId = null) {
         // Dartで検査・組み立て済みのメルヘンJSONは、保存のために全文を解析し直さない。
         const pscube = !meruhen && JSON.parse(text).format === 'pscube-viewer';
         if (pscube) await (await pscubeBridge()).save(text);
         // 保存に失敗したら、その種類（保存先が返したエラー名・中断の別・画面が裏だったか）を診断に控える
         // （2026-11-18：iPhoneで「端末に保存できませんでした」が出たが、原因の手がかりが残っていなかった）。保存の動きは変えない。
         let stage = 'open', event = null;
+        const bodyId = pscube ? null : (typeof keepId === 'string' && keepId ? keepId : newBodyId());
         try {
           const db = await open();
           stage = 'write';
           try {
             await new Promise((resolve, reject) => {
               const tx = db.transaction(STORE, 'readwrite');
-              if (!pscube) tx.objectStore(STORE).put(text, 'data');
+              if (!pscube) { tx.objectStore(STORE).put(text, 'data'); tx.objectStore(STORE).put(bodyId, 'data_id'); }
               tx.objectStore(STORE).put(pscube ? 'pscube' : 'meruhen', 'active_source');
               tx.oncomplete = resolve;
               tx.onerror = tx.onabort = e => { event = e?.type || null; reject(tx.error || new Error('端末に保存できませんでした。')); };
@@ -397,11 +416,18 @@
           throw error;
         }
         remember(text, pscube ? 'pscube' : 'meruhen');
+        if (!pscube) loadedId = bodyId;
+        return bodyId;
       },
       async load() {
+        loadedId = null;
         if (await pscubeActive()) return remember(await (await pscubeBridge()).load(), 'pscube');
-        return remember(await readStored(), 'meruhen');
+        const {text, id} = await readStoredWithId();
+        loadedId = text == null ? null : id;
+        return remember(text, 'meruhen');
       },
+      // 直前の load（または save）の本体の目印。無ければ null。
+      loadedId() { return loadedId; },
       // 保存の診断（「更新・差枚の取得状況」）。行の配列のJSON。
       async storageReport() {
         const diag = await import('./storage_report.mjs');

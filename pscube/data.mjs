@@ -337,7 +337,17 @@ export const dateEventKey = e => JSON.stringify([e.store, e.rate, e.day]);
 export const DATE_EVENT_MAX = 60;
 /** 末尾イベの印（以前の形）を読み替えるイベント名。 */
 export const SUFFIX_EVENT_NAME = '末尾イベ';
-const eventTime = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(v) && Number.isFinite(Date.parse(v));
+const pscubeEventTime = v => {
+  if (typeof v !== 'string') return null;
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})$/.exec(v);
+  if (!m) return null;
+  const frac = (m[2] || '').slice(0, 6).padEnd(6, '0');
+  const zone = m[3] === 'Z' ? 'Z' : m[3].replace(/^([+-]\d{2}):?(\d{2})$/, '$1:$2');
+  const ms = Date.parse(m[1] + '.' + frac.slice(0, 3) + zone);
+  return Number.isFinite(ms) ? {ms, us: Number(frac.slice(3, 6))} : null;
+};
+const pscubeCompareEventTime = (a, b) => (a.ms !== b.ms ? a.ms - b.ms : a.us - b.us);
+const eventTime = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(v) && pscubeEventTime(v) !== null;
 const eventScope = e => e && typeof e.store === 'string' && /^c\d+$/.test(e.store) &&
   typeof e.rate === 'string' && /^\d+(?:\.\d+)?$/.test(e.rate) && validDay(e.day);
 /** イベント名を整える。空・60文字超・改行などの制御文字は使えない（null は「イベントなし」）。 */
@@ -355,7 +365,11 @@ export function mergeDateEvents(stored = [], incoming = []) {
   const events = new Map(stored.map(e => [dateEventKey(e), e]));
   for (const e of incoming) {
     const previous = events.get(dateEventKey(e));
-    if (!previous || Date.parse(e.updated_at) >= Date.parse(previous.updated_at)) events.set(dateEventKey(e), e);
+    const incomingAt = pscubeEventTime(e.updated_at);
+    const previousAt = previous ? pscubeEventTime(previous.updated_at) : null;
+    if (!previous || (incomingAt != null && (previousAt == null || pscubeCompareEventTime(incomingAt, previousAt) >= 0))) {
+      events.set(dateEventKey(e), e);
+    }
   }
   return [...events.values()];
 }
@@ -387,10 +401,11 @@ export function dateEventNames(events = []) {
   const latest = new Map();
   for (const e of events) {
     if (e.name == null) continue;
-    const time = Date.parse(e.updated_at);
-    if (!latest.has(e.name) || time > latest.get(e.name)) latest.set(e.name, time);
+    const time = pscubeEventTime(e.updated_at);
+    if (!time) continue;
+    if (!latest.has(e.name) || pscubeCompareEventTime(time, latest.get(e.name)) > 0) latest.set(e.name, time);
   }
-  return [...latest].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja')).map(([name]) => name);
+  return [...latest].sort((a, b) => pscubeCompareEventTime(b[1], a[1]) || a[0].localeCompare(b[0], 'ja')).map(([name]) => name);
 }
 
 // アナスロで補った台の推定差枚（PC anaslo_net.valid・Dart validPscubeNetEstimate・共有カレンダー pscubeNetEstimate と
