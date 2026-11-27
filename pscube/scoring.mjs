@@ -32,7 +32,7 @@ export function profileOf(machine) {
 }
 
 /** 1日ではあり得ない数値（点検中の88888888など）。採点も比較相手にも使わない。 */
-export const implausible = r => r.games > 20000 || r.bb > 500 || r.rb > 500 || r.my > 100000;
+export const implausible = r => r.games > 20000 || r.bb > 500 || r.rb > 500 || (r.my != null && r.my > 100000);
 
 const round1 = v => Math.round(v * 10) / 10;
 const fixed9 = v => Number(v.toFixed(9));
@@ -99,11 +99,15 @@ export function scoreRecord(row, data) {
   if (implausible(row)) return { ...base, reasons: ['サイトの数値が異常なため採点なし（88888888などの表示）'] };
   if (row.games <= MIN_SCORED_GAMES) return { ...base, reasons: [`${MIN_SCORED_GAMES}G以下のため採点なし`] };
   const refs = comparisonPool(row, data), reasons = [];
-  const days = new Set(refs.map(r => r.day)).size;
+  const hitRefs = refs.filter(r => r.bb >= 0 && r.rb >= 0);
+  const holdRefs = refs.filter(r => r.my != null && r.my >= 0);
+  const days = new Set(hitRefs.map(r => r.day)).size;
+  const holdDays = new Set(holdRefs.map(r => r.day)).size;
   const rate = r => (r.bb + r.rb) / r.games;
-  const hit = weights.hit ? adjustedRank(rate(row), refs, rate, weights.hit, row.games) : null;
-  const rankedHold = adjustedRank(row.my, refs, r => r.my, weights.hold, row.games);
-  const absolute = row.rate === COMPLETE_HOLD_RATE ? weights.hold * Math.min(1, row.my / COMPLETE_HOLD) : null;
+  const hit = weights.hit ? adjustedRank(rate(row), hitRefs, rate, weights.hit, row.games) : null;
+  const rowMy = row.my != null && row.my >= 0 ? row.my : null;
+  const rankedHold = adjustedRank(rowMy, holdRefs, r => r.my, weights.hold, row.games);
+  const absolute = row.rate === COMPLETE_HOLD_RATE && rowMy != null ? weights.hold * Math.min(1, rowMy / COMPLETE_HOLD) : null;
   // 枚数による点は、順位による点を引き上げるときだけ使う（下げない）。
   const hold = rankedHold == null ? null : Math.max(rankedHold, absolute ?? 0);
   if (weights.hit && hit == null) reasons.push(`当たり頻度の比較データ不足：中立${weights.hit / 2}点で補完`);
@@ -126,12 +130,20 @@ export function scoreRecord(row, data) {
     .filter(p => p[2] > 0);
   const missing = parts.filter(p => p[1] == null).reduce((v, p) => v + p[2], 0);
   const observed = parts.reduce((v, p) => v + (p[1] ?? 0), 0);
-  const provisional = missing > 0 || row.games < SHRINK_GAMES || refs.length < MIN_REFS || days < SHRINK_DAYS;
+  const refCount = weights.hit ? Math.min(hitRefs.length, holdRefs.length) : holdRefs.length;
+  const refDays = weights.hit ? Math.min(days, holdDays) : holdDays;
+  const provisional = missing > 0 || row.games < SHRINK_GAMES || refCount < MIN_REFS || refDays < SHRINK_DAYS;
   if (provisional) reasons.push('少数データ・欠測を含む評価');
-  reasons.push(`比較${refs.length}件/${days}日・観測${row.games}G`);
+  if (holdRefs.length === hitRefs.length && holdRefs.length === refs.length) {
+    reasons.push(`比較${refs.length}件/${days}日・観測${row.games}G`);
+  } else if (!weights.hit) {
+    reasons.push(`MY比較${holdRefs.length}件/${holdDays}日・観測${row.games}G`);
+  } else {
+    reasons.push(`比較${hitRefs.length}件/${days}日・MY比較${holdRefs.length}件・観測${row.games}G`);
+  }
   if (missing > 0) reasons.push(`評価可能配点${100 - missing}/100・欠測による幅${round1(observed).toFixed(1)}〜${round1(observed + missing).toFixed(1)}（信頼区間ではありません）`);
   return { ...base, parts: { hit, hold, end, retention }, total: round1(observed + missing / 2), provisional,
-    coverage: 100 - missing, refs: refs.length, days, reasons };
+    coverage: 100 - missing, refs: weights.hit ? hitRefs.length : holdRefs.length, days: weights.hit ? days : holdDays, reasons };
 }
 
 // ---- 翌日候補 ----
@@ -144,7 +156,8 @@ export function nextDayEvidence(record, data) {
   const profile = profileOf(machineInfo(data, record)), metric = dayMetric(profile);
   const first = dayShift(record.day, -30), byDay = new Map();
   for (const r of machineHistory(data, record)) {
-    if (r.day >= first && r.day <= record.day && r.games >= MIN_SCORED_GAMES && !implausible(r) && r.source_site !== 'anaslo') {
+    if (r.day >= first && r.day <= record.day && r.games >= MIN_SCORED_GAMES && !implausible(r) && r.source_site !== 'anaslo' &&
+      (profile === 'normal' ? (r.bb >= 0 && r.rb >= 0) : (r.my != null && r.my >= 0))) {
       if (!byDay.has(r.day)) byDay.set(r.day, []);
       byDay.get(r.day).push(r);
     }

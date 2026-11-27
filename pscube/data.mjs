@@ -628,8 +628,8 @@ export function mergeNetSupplement(stored, incoming, report = {}) {
 /** 沖ドキ（「沖ドキ」「オキドキ」、半角も）は取り込みの対象外（メルヘンと同じ約束）。 */
 export const isExcludedMachine = name => /沖ドキ|オキドキ/.test(String(name ?? '').normalize('NFKC'));
 
-/** 当たりが1回もない台（BB・RB・AT/ARTがすべて0、0回転を含む）。台別7日分は取りに行かない（PC・Androidと同じ）。 */
-export const noHits = r => r.bb + r.rb + r.at_art === 0;
+/** 当たりが1回もない台（BB・RB・AT/ARTがすべて0、0回転を含む）。サイトセブン補完など at_art=null はAT当たりの可能性があるため除外。 */
+export const noHits = r => r.bb === 0 && r.rb === 0 && r.at_art === 0;
 
 /** 台別7日分を取りに行かない台（2026-11-05）：当たり0回の台と、500G以下の台（採点の MIN_SCORED_GAMES と同じ。PC・Androidと同じ）。 */
 export const skipsRackPage = r => noHits(r) || (Number.isInteger(r.games) && r.games <= 500);
