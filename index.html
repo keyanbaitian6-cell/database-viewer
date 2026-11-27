@@ -85,7 +85,7 @@
     }
 
     const notBackup = (format) => new Error(format === 'pscube-viewer'
-      ? 'P’s CUBEのファイルです。P’s CUBEのページ（https://keyanbaitian6-cell.github.io/database-viewer/pscube/）の「ファイルを読み込む」で読み込んでください。'
+      ? 'P-STATIONのファイルです。P-STATIONのページ（https://keyanbaitian6-cell.github.io/database-viewer/pscube/）の「バックアップを読み込む」で読み込んでください。'
       : 'databaseのバックアップファイルではありません。');
     const validate = doc => {
       if (doc && typeof doc.error === 'string') throw new Error(doc.error);
